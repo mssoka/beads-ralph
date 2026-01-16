@@ -14,3 +14,11 @@ Status: COMPLETE
 - Test exists in index.test.ts:19-24 and passes
 - All tests pass (3/3)
 - TypeScript type checking passes
+
+Task: Implement a GET / route that returns plain text "Hello from Bun"
+Status: COMPLETE
+- Endpoint already implemented in index.ts:10-14
+- Returns new Response("Hello from Bun") with Content-Type: text/plain
+- Test exists in index.test.ts:11-17 and passes
+- All tests pass (3/3)
+- TypeScript type checking passes
