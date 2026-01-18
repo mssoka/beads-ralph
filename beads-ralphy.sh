@@ -1670,19 +1670,34 @@ run_single_task() {
     # Return to base branch
     return_to_base_branch
 
+    # Check if AI signaled completion
+    if [[ "$result" == *"<promise>COMPLETE</promise>"* ]]; then
+      log_debug "AI signaled task completion"
+
+      # Verify git working directory is clean (excluding .beads/ internal files)
+      local uncommitted_changes
+      uncommitted_changes=$(git status --porcelain | grep -v '^.. .beads/')
+
+      if [[ -n "$uncommitted_changes" ]]; then
+        log_warn "Task marked complete but uncommitted changes detected"
+        log_warn "The agent may have forgotten to commit. Uncommitted changes:"
+        echo "$uncommitted_changes"
+        log_info "Not marking task as complete in beads - task may be retried"
+      else
+        # Working directory is clean (ignoring .beads/ metadata), safe to mark complete
+        log_debug "Working directory clean, marking task complete in beads"
+        mark_task_complete "$current_task"
+      fi
+    fi
+
     # Check for completion - verify by actually counting remaining tasks
     local remaining_count
     remaining_count=$(count_remaining_tasks | tr -d '[:space:]' | head -1)
     remaining_count=${remaining_count:-0}
     [[ "$remaining_count" =~ ^[0-9]+$ ]] || remaining_count=0
-    
+
     if [[ "$remaining_count" -eq 0 ]]; then
       return 2  # All tasks actually complete
-    fi
-    
-    # AI might claim completion but tasks remain - continue anyway
-    if [[ "$result" == *"<promise>COMPLETE</promise>"* ]]; then
-      log_debug "AI claimed completion but $remaining_count tasks remain, continuing..."
     fi
 
     return 0
@@ -2694,7 +2709,11 @@ main() {
         exit 0
         ;;
     esac
-    
+
+    # Sync beads state after each task (ensures BV sees updated status on next iteration)
+    log_debug "Syncing beads state..."
+    bd sync 2>&1 | grep -v '^$' || log_warn "bd sync failed (non-fatal)"
+
     # Check max iterations
     if [[ $MAX_ITERATIONS -gt 0 ]] && [[ $iteration -ge $MAX_ITERATIONS ]]; then
       log_warn "Reached max iterations ($MAX_ITERATIONS)"
