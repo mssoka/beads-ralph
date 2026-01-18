@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 # ============================================
-# Ralphy - Autonomous AI Coding Loop
+# Beads-Ralphy - Autonomous AI Coding Loop (Beads Edition)
 # Supports Claude Code, OpenCode, Codex, Cursor, Qwen-Code and Factory Droid
-# Runs until PRD is complete
+# Runs until all tasks are complete
 # ============================================
 
 set -euo pipefail
@@ -16,7 +16,6 @@ VERSION="4.0.0"
 
 # Ralphy config directory
 RALPHY_DIR=".ralphy"
-PROGRESS_FILE="$RALPHY_DIR/progress.txt"
 CONFIG_FILE="$RALPHY_DIR/config.yaml"
 SINGLE_TASK=""
 INIT_MODE=false
@@ -44,11 +43,8 @@ PR_DRAFT=false
 PARALLEL=false
 MAX_PARALLEL=3
 
-# PRD source options
-PRD_SOURCE="markdown"  # markdown, yaml, github
-PRD_FILE="PRD.md"
-GITHUB_REPO=""
-GITHUB_LABEL=""
+# Beads source options
+BEADS_LABEL="ralph"  # Default label filter for tasks
 
 # Colors (detect if terminal supports colors)
 if [[ -t 1 ]] && command -v tput &>/dev/null && [[ $(tput colors 2>/dev/null || echo 0) -ge 8 ]]; then
@@ -272,19 +268,14 @@ boundaries:
     # - "*.lock"
 EOF
 
-  # Create progress.txt
-  echo "# Ralphy Progress Log" > "$PROGRESS_FILE"
-  echo "" >> "$PROGRESS_FILE"
-
   log_success "Created $RALPHY_DIR/"
   echo ""
   echo "  ${CYAN}$CONFIG_FILE${RESET}   - Your rules and preferences"
-  echo "  ${CYAN}$PROGRESS_FILE${RESET} - Progress log (auto-updated)"
   echo ""
   echo "${BOLD}Next steps:${RESET}"
-  echo "  1. Add rules:  ${CYAN}ralphy --add-rule \"your rule here\"${RESET}"
+  echo "  1. Add rules:  ${CYAN}beads-ralphy --add-rule \"your rule here\"${RESET}"
   echo "  2. Or edit:    ${CYAN}$CONFIG_FILE${RESET}"
-  echo "  3. Run:        ${CYAN}ralphy \"your task\"${RESET} or ${CYAN}ralphy${RESET} (with PRD.md)"
+  echo "  3. Run:        ${CYAN}beads-ralphy \"your task\"${RESET} or ${CYAN}beads-ralphy${RESET} (in beads project)"
 }
 
 # Load rules from config.yaml
@@ -425,23 +416,18 @@ load_project_context() {
 }
 
 # Log task to progress file
-log_task_history() {
+# Build prompt with beads task context
+build_beads_prompt() {
   local task="$1"
-  local status="$2"  # completed, failed
+  local task_id=$(echo "$task" | cut -d: -f1)
 
-  [[ ! -f "$PROGRESS_FILE" ]] && return
+  # Get task details from beads
+  local task_data=$(bd show "$task_id" --json 2>/dev/null | jq '.[0]')
+  local title=$(echo "$task_data" | jq -r '.title')
+  local description=$(echo "$task_data" | jq -r '.description // ""')
+  local design=$(echo "$task_data" | jq -r '.design // ""')
+  local acceptance=$(echo "$task_data" | jq -r '.acceptance // ""')
 
-  local timestamp
-  timestamp=$(date '+%Y-%m-%d %H:%M')
-  local icon="✓"
-  [[ "$status" == "failed" ]] && icon="✗"
-
-  echo "- [$icon] $timestamp - $task" >> "$PROGRESS_FILE"
-}
-
-# Build prompt with brownfield context
-build_brownfield_prompt() {
-  local task="$1"
   local prompt=""
 
   # Add project context if available
@@ -475,14 +461,36 @@ $never_touch
 "
   fi
 
-  # Add the task
-  prompt+="## Task
-$task
+  # Add task details
+  prompt+="## Task: $task_id - $title
+"
 
+  if [[ -n "$description" ]]; then
+    prompt+="
+### Description
+$description
+"
+  fi
+
+  if [[ -n "$design" ]]; then
+    prompt+="
+### Design Approach
+$design
+"
+  fi
+
+  if [[ -n "$acceptance" ]]; then
+    prompt+="
+### Acceptance Criteria
+$acceptance
+"
+  fi
+
+  prompt+="
 ## Instructions
-1. Implement the task described above
-2. Write tests if appropriate
-3. Ensure the code works correctly"
+1. Implement the task following the design approach
+2. Verify all acceptance criteria are met
+3. Run tests if appropriate"
 
   # Add commit instruction only if auto-commit is enabled
   if [[ "$AUTO_COMMIT" == "true" ]]; then
@@ -491,6 +499,9 @@ $task
   fi
 
   prompt+="
+
+## Completion Signal
+When THIS TASK is complete, output <promise>COMPLETE</promise>
 
 Keep changes focused and minimal. Do not refactor unrelated code."
 
@@ -508,7 +519,7 @@ run_brownfield_task() {
   echo ""
 
   local prompt
-  prompt=$(build_brownfield_prompt "$task")
+  prompt=$(build_beads_prompt "$task")
 
   # Create temp file for output
   local output_file
@@ -550,12 +561,10 @@ run_brownfield_task() {
 
   local exit_code=$?
 
-  # Log to history
+  # Log result
   if [[ $exit_code -eq 0 ]]; then
-    log_task_history "$task" "completed"
     log_success "Task completed"
   else
-    log_task_history "$task" "failed"
     log_error "Task failed"
   fi
 
@@ -572,9 +581,9 @@ show_help() {
 ${BOLD}Ralphy${RESET} - Autonomous AI Coding Loop (v${VERSION})
 
 ${BOLD}USAGE:${RESET}
-  ./ralphy.sh [options]              # PRD mode (requires PRD.md)
-  ./ralphy.sh "task description"     # Single task mode (brownfield)
-  ./ralphy.sh --init                 # Initialize .ralphy/ config
+  ./beads-ralphy.sh [options]        # Beads mode (requires .beads/ directory)
+  ./beads-ralphy.sh "task"           # Single task mode (brownfield)
+  ./beads-ralphy.sh --init           # Initialize .ralphy/ config
 
 ${BOLD}CONFIG & SETUP:${RESET}
   --init              Initialize .ralphy/ with smart defaults
@@ -582,7 +591,7 @@ ${BOLD}CONFIG & SETUP:${RESET}
   --add-rule "..."    Add a rule to config (e.g., "Always use Zod")
 
 ${BOLD}SINGLE TASK MODE:${RESET}
-  "task description"  Run a single task without PRD (quotes required)
+  "task description"  Run a single task (brownfield mode, quotes required)
   --no-commit         Don't auto-commit after task completion
 
 ${BOLD}AI ENGINE OPTIONS:${RESET}
@@ -614,11 +623,8 @@ ${BOLD}GIT BRANCH OPTIONS:${RESET}
   --create-pr         Create a pull request after each task (requires gh CLI)
   --draft-pr          Create PRs as drafts
 
-${BOLD}PRD SOURCE OPTIONS:${RESET}
-  --prd FILE          PRD file path (default: PRD.md)
-  --yaml FILE         Use YAML task file instead of markdown
-  --github REPO       Fetch tasks from GitHub issues (e.g., owner/repo)
-  --github-label TAG  Filter GitHub issues by label
+${BOLD}BEADS OPTIONS:${RESET}
+  --label TAG         Filter tasks by label (default: ralph)
 
 ${BOLD}OTHER OPTIONS:${RESET}
   -v, --verbose       Show debug output
@@ -626,31 +632,23 @@ ${BOLD}OTHER OPTIONS:${RESET}
   --version           Show version number
 
 ${BOLD}EXAMPLES:${RESET}
-  # Brownfield mode (single tasks in existing projects)
-  ./ralphy.sh --init                       # Initialize config
-  ./ralphy.sh "add dark mode toggle"       # Run single task
-  ./ralphy.sh "fix the login bug" --cursor # Single task with Cursor
+  # Single task mode
+  ./beads-ralphy.sh --init                       # Initialize config
+  ./beads-ralphy.sh "add dark mode toggle"       # Run single task
+  ./beads-ralphy.sh "fix the login bug" --cursor # Single task with Cursor
 
-  # PRD mode (task lists)
-  ./ralphy.sh                              # Run with Claude Code
-  ./ralphy.sh --codex                      # Run with Codex CLI
-  ./ralphy.sh --branch-per-task --create-pr  # Feature branch workflow
-  ./ralphy.sh --parallel --max-parallel 4  # Run 4 tasks concurrently
-  ./ralphy.sh --yaml tasks.yaml            # Use YAML task file
-  ./ralphy.sh --github owner/repo          # Fetch from GitHub issues
+  # Beads mode (works on tasks from beads tracker)
+  ./beads-ralphy.sh                              # Run with Claude Code (ralph label)
+  ./beads-ralphy.sh --codex                      # Run with Codex CLI
+  ./beads-ralphy.sh --label critical             # Only process 'critical' labeled tasks
+  ./beads-ralphy.sh --parallel --max-parallel 4  # Run 4 tasks concurrently
+  ./beads-ralphy.sh --branch-per-task --create-pr  # Feature branch workflow
 
-${BOLD}PRD FORMATS:${RESET}
-  Markdown (PRD.md):
-    - [ ] Task description
-
-  YAML (tasks.yaml):
-    tasks:
-      - title: Task description
-        completed: false
-        parallel_group: 1  # Optional: tasks with same group run in parallel
-
-  GitHub Issues:
-    Uses open issues from the specified repository
+${BOLD}BEADS INTEGRATION:${RESET}
+  Requires .beads/ directory with beads issue tracker
+  Uses BV (beads viewer) for intelligent task ranking via PageRank
+  Filters tasks by label (default: ralph)
+  Automatically respects task dependencies
 
 EOF
 }
@@ -743,23 +741,8 @@ parse_args() {
         PR_DRAFT=true
         shift
         ;;
-      --prd)
-        PRD_FILE="${2:-PRD.md}"
-        PRD_SOURCE="markdown"
-        shift 2
-        ;;
-      --yaml)
-        PRD_FILE="${2:-tasks.yaml}"
-        PRD_SOURCE="yaml"
-        shift 2
-        ;;
-      --github)
-        GITHUB_REPO="${2:-}"
-        PRD_SOURCE="github"
-        shift 2
-        ;;
-      --github-label)
-        GITHUB_LABEL="${2:-}"
+      --label)
+        BEADS_LABEL="${2:-ralph}"
         shift 2
         ;;
       -v|--verbose)
@@ -816,39 +799,28 @@ parse_args() {
 check_requirements() {
   local missing=()
 
-  # Check for PRD source
-  case "$PRD_SOURCE" in
-    markdown)
-      if [[ ! -f "$PRD_FILE" ]]; then
-        log_error "$PRD_FILE not found in current directory"
-        log_info "Create a PRD.md file with tasks marked as '- [ ] Task description'"
-        log_info "Or use: --yaml tasks.yaml for YAML task files"
-        exit 1
-      fi
-      ;;
-    yaml)
-      if [[ ! -f "$PRD_FILE" ]]; then
-        log_error "$PRD_FILE not found in current directory"
-        log_info "Create a tasks.yaml file with tasks in YAML format"
-        log_info "Or use: --prd PRD.md for Markdown task files"
-        exit 1
-      fi
-      if ! command -v yq &>/dev/null; then
-        log_error "yq is required for YAML parsing. Install from https://github.com/mikefarah/yq"
-        exit 1
-      fi
-      ;;
-    github)
-      if [[ -z "$GITHUB_REPO" ]]; then
-        log_error "GitHub repository not specified. Use --github owner/repo"
-        exit 1
-      fi
-      if ! command -v gh &>/dev/null; then
-        log_error "GitHub CLI (gh) is required. Install from https://cli.github.com/"
-        exit 1
-      fi
-      ;;
-  esac
+  # Check for beads/bv requirements
+  if ! command -v jq &>/dev/null; then
+    log_error "jq is required. Install from: https://jqlang.github.io/jq/"
+    exit 1
+  fi
+
+  if ! command -v bd &>/dev/null; then
+    log_error "bd CLI not found."
+    log_info "Install from: https://github.com/onbeam/beads"
+    exit 1
+  fi
+
+  if ! command -v bv &>/dev/null; then
+    log_error "bv CLI not found."
+    log_info "Install from: https://github.com/onbeam/beads"
+    exit 1
+  fi
+
+  if [[ ! -d ".beads" ]]; then
+    log_error "No .beads directory found. Initialize with: bd init"
+    exit 1
+  fi
 
   # Check for AI CLI
   case "$AI_ENGINE" in
@@ -925,13 +897,8 @@ check_requirements() {
     exit 1
   fi
 
-  # Ensure .ralphy/ directory exists and create progress.txt if missing
+  # Ensure .ralphy/ directory exists
   mkdir -p "$RALPHY_DIR"
-  if [[ ! -f "$PROGRESS_FILE" ]]; then
-    log_info "Creating $PROGRESS_FILE..."
-    echo "# Ralphy Progress Log" > "$PROGRESS_FILE"
-    echo "" >> "$PROGRESS_FILE"
-  fi
 
   # Set base branch if not specified
   if [[ "$BRANCH_PER_TASK" == true ]] && [[ -z "$BASE_BRANCH" ]]; then
@@ -1003,163 +970,133 @@ cleanup() {
 }
 
 # ============================================
-# TASK SOURCES - MARKDOWN
+# TASK SOURCES - BEADS/BV (GLOBAL)
 # ============================================
 
-get_tasks_markdown() {
-  grep '^\- \[ \]' "$PRD_FILE" 2>/dev/null | sed 's/^- \[ \] //' || true
+get_tasks_beads() {
+  # Get all open tasks with label filter
+  local label_filter="${BEADS_LABEL:-ralph}"
+
+  bv --robot-triage 2>/dev/null | \
+    jq -r --arg label "$label_filter" '.triage.recommendations[] |
+           select(.status == "open") |
+           select(.labels | index($label)) |
+           .id + ":" + .title' || true
 }
 
-get_next_task_markdown() {
-  grep -m1 '^\- \[ \]' "$PRD_FILE" 2>/dev/null | sed 's/^- \[ \] //' | cut -c1-50 || echo ""
+get_next_task_beads() {
+  # Get top-ranked task from BV triage
+  local label_filter="${BEADS_LABEL:-ralph}"
+
+  bv --robot-triage 2>/dev/null | \
+    jq -r --arg label "$label_filter" '.triage.recommendations[] |
+           select(.status == "open") |
+           select(.labels | index($label)) |
+           .id + ":" + .title' | \
+    head -1 | cut -c1-70 || echo ""
 }
 
-count_remaining_markdown() {
-  grep -c '^\- \[ \]' "$PRD_FILE" 2>/dev/null || echo "0"
+count_remaining_beads() {
+  # Count open tasks with label
+  local label_filter="${BEADS_LABEL:-ralph}"
+
+  bv --robot-triage 2>/dev/null | \
+    jq --arg label "$label_filter" \
+      '[.triage.recommendations[] |
+        select(.status == "open") |
+        select(.labels | index($label))] | length' || echo "0"
 }
 
-count_completed_markdown() {
-  grep -c '^\- \[x\]' "$PRD_FILE" 2>/dev/null || echo "0"
+count_completed_beads() {
+  # Count closed tasks with label
+  local label_filter="${BEADS_LABEL:-ralph}"
+
+  bd list --status=closed --json 2>/dev/null | \
+    jq --arg label "$label_filter" \
+      '[.[] | select(.labels | index($label))] | length' || echo "0"
 }
 
-mark_task_complete_markdown() {
+mark_task_complete_beads() {
   local task=$1
-  # For macOS sed (BRE), we need to:
-  # - Escape: [ ] \ . * ^ $ /
-  # - NOT escape: { } ( ) + ? | (these are literal in BRE)
-  local escaped_task
-  escaped_task=$(printf '%s\n' "$task" | sed 's/[[\.*^$/]/\\&/g')
-  sed -i.bak "s/^- \[ \] ${escaped_task}/- [x] ${escaped_task}/" "$PRD_FILE"
-  rm -f "${PRD_FILE}.bak"
+  local task_id=$(echo "$task" | cut -d: -f1)
+
+  log_debug "Closing beads task: $task_id"
+  bd close "$task_id" 2>&1 | grep -v '^$' || true
 }
 
-# ============================================
-# TASK SOURCES - YAML
-# ============================================
-
-get_tasks_yaml() {
-  yq -r '.tasks[] | select(.completed != true) | .title' "$PRD_FILE" 2>/dev/null || true
-}
-
-get_next_task_yaml() {
-  yq -r '.tasks[] | select(.completed != true) | .title' "$PRD_FILE" 2>/dev/null | head -1 | cut -c1-50 || echo ""
-}
-
-count_remaining_yaml() {
-  yq -r '[.tasks[] | select(.completed != true)] | length' "$PRD_FILE" 2>/dev/null || echo "0"
-}
-
-count_completed_yaml() {
-  yq -r '[.tasks[] | select(.completed == true)] | length' "$PRD_FILE" 2>/dev/null || echo "0"
-}
-
-mark_task_complete_yaml() {
+mark_task_in_progress_beads() {
   local task=$1
-  yq -i "(.tasks[] | select(.title == \"$task\")).completed = true" "$PRD_FILE"
+  local task_id=$(echo "$task" | cut -d: -f1)
+
+  log_debug "Marking beads task in progress: $task_id"
+  bd update "$task_id" --status=in_progress 2>&1 | grep -v '^$' || true
 }
 
-get_parallel_group_yaml() {
-  local task=$1
-  yq -r ".tasks[] | select(.title == \"$task\") | .parallel_group // 0" "$PRD_FILE" 2>/dev/null || echo "0"
+get_beads_parallel_tracks() {
+  # Get execution tracks for all open tasks with label
+  local label_filter="${BEADS_LABEL:-ralph}"
+
+  # Get task IDs with label
+  local task_ids=$(bv --robot-triage 2>/dev/null | \
+    jq -r --arg label "$label_filter" '.triage.recommendations[] |
+           select(.status == "open") |
+           select(.labels | index($label)) |
+           .id')
+
+  # Filter BV tracks to only include labeled tasks
+  bv --robot-triage-by-track 2>/dev/null | \
+    jq -r --argjson ids "$(echo "$task_ids" | jq -R . | jq -s .)" \
+      '.triage.recommendations_by_track | to_entries |
+       map(select(.value[].id | IN($ids[]))) |
+       map(.key) | .[]' | \
+    sort -n | uniq || echo "0"
 }
 
-get_tasks_in_group_yaml() {
-  local group=$1
-  yq -r ".tasks[] | select(.completed != true and (.parallel_group // 0) == $group) | .title" "$PRD_FILE" 2>/dev/null || true
-}
+get_tasks_in_track_beads() {
+  local track=$1
+  local label_filter="${BEADS_LABEL:-ralph}"
 
-# ============================================
-# TASK SOURCES - GITHUB ISSUES
-# ============================================
+  # Get task IDs with label
+  local task_ids=$(bv --robot-triage 2>/dev/null | \
+    jq -r --arg label "$label_filter" '.triage.recommendations[] |
+           select(.status == "open") |
+           select(.labels | index($label)) |
+           .id')
 
-get_tasks_github() {
-  local args=(--repo "$GITHUB_REPO" --state open --json number,title)
-  [[ -n "$GITHUB_LABEL" ]] && args+=(--label "$GITHUB_LABEL")
-
-  gh issue list "${args[@]}" \
-    --jq '.[] | "\(.number):\(.title)"' 2>/dev/null || true
-}
-
-get_next_task_github() {
-  local args=(--repo "$GITHUB_REPO" --state open --limit 1 --json number,title)
-  [[ -n "$GITHUB_LABEL" ]] && args+=(--label "$GITHUB_LABEL")
-
-  gh issue list "${args[@]}" \
-    --jq '.[0] | "\(.number):\(.title)"' 2>/dev/null | cut -c1-50 || echo ""
-}
-
-count_remaining_github() {
-  local args=(--repo "$GITHUB_REPO" --state open --json number)
-  [[ -n "$GITHUB_LABEL" ]] && args+=(--label "$GITHUB_LABEL")
-
-  gh issue list "${args[@]}" \
-    --jq 'length' 2>/dev/null || echo "0"
-}
-
-count_completed_github() {
-  local args=(--repo "$GITHUB_REPO" --state closed --json number)
-  [[ -n "$GITHUB_LABEL" ]] && args+=(--label "$GITHUB_LABEL")
-
-  gh issue list "${args[@]}" \
-    --jq 'length' 2>/dev/null || echo "0"
-}
-
-mark_task_complete_github() {
-  local task=$1
-  # Extract issue number from "number:title" format
-  local issue_num="${task%%:*}"
-  gh issue close "$issue_num" --repo "$GITHUB_REPO" 2>/dev/null || true
-}
-
-get_github_issue_body() {
-  local task=$1
-  local issue_num="${task%%:*}"
-  gh issue view "$issue_num" --repo "$GITHUB_REPO" --json body --jq '.body' 2>/dev/null || echo ""
+  # Get tasks in track that have the label
+  bv --robot-triage-by-track 2>/dev/null | \
+    jq -r --arg track "$track" --argjson ids "$(echo "$task_ids" | jq -R . | jq -s .)" \
+      ".triage.recommendations_by_track[\$track][] |
+       select(.id | IN(\$ids[])) |
+       .id + \":\" + .title" || true
 }
 
 # ============================================
-# UNIFIED TASK INTERFACE
+# TASK INTERFACE (Direct calls to beads functions)
 # ============================================
 
 get_next_task() {
-  case "$PRD_SOURCE" in
-    markdown) get_next_task_markdown ;;
-    yaml) get_next_task_yaml ;;
-    github) get_next_task_github ;;
-  esac
+  get_next_task_beads
 }
 
 get_all_tasks() {
-  case "$PRD_SOURCE" in
-    markdown) get_tasks_markdown ;;
-    yaml) get_tasks_yaml ;;
-    github) get_tasks_github ;;
-  esac
+  get_tasks_beads
 }
 
 count_remaining_tasks() {
-  case "$PRD_SOURCE" in
-    markdown) count_remaining_markdown ;;
-    yaml) count_remaining_yaml ;;
-    github) count_remaining_github ;;
-  esac
+  count_remaining_beads
 }
 
 count_completed_tasks() {
-  case "$PRD_SOURCE" in
-    markdown) count_completed_markdown ;;
-    yaml) count_completed_yaml ;;
-    github) count_completed_github ;;
-  esac
+  count_completed_beads
 }
 
 mark_task_complete() {
-  local task=$1
-  case "$PRD_SOURCE" in
-    markdown) mark_task_complete_markdown "$task" ;;
-    yaml) mark_task_complete_yaml "$task" ;;
-    github) mark_task_complete_github "$task" ;;
-  esac
+  mark_task_complete_beads "$1"
+}
+
+mark_task_in_progress() {
+  mark_task_in_progress_beads "$1"
 }
 
 # ============================================
@@ -1266,8 +1203,8 @@ monitor_progress() {
         current_step="Staging"
       elif echo "$content" | grep -qE 'progress\.txt'; then
         current_step="Logging"
-      elif echo "$content" | grep -qE 'PRD\.md|tasks\.yaml'; then
-        current_step="Updating PRD"
+      elif echo "$content" | grep -qE 'bd close|bd update.*--status'; then
+        current_step="Updating task status"
       elif echo "$content" | grep -qE 'lint|eslint|biome|prettier'; then
         current_step="Linting"
       elif echo "$content" | grep -qE 'vitest|jest|bun test|npm test|pytest|go test'; then
@@ -1348,124 +1285,6 @@ notify_error() {
   if command -v notify-send &>/dev/null; then
     notify-send -u critical "Ralphy - Error" "$message" 2>/dev/null || true
   fi
-}
-
-# ============================================
-# PROMPT BUILDER
-# ============================================
-
-build_prompt() {
-  local task_override="${1:-}"
-  local prompt=""
-
-  # Add .ralphy/ config if available (works with PRD mode too)
-  if [[ -d "$RALPHY_DIR" ]]; then
-    # Add project context
-    local context
-    context=$(load_project_context)
-    if [[ -n "$context" ]]; then
-      prompt+="## Project Context
-$context
-
-"
-    fi
-
-    # Add rules
-    local rules
-    rules=$(load_ralphy_rules)
-    if [[ -n "$rules" ]]; then
-      prompt+="## Rules (you MUST follow these)
-$rules
-
-"
-    fi
-
-    # Add boundaries
-    local never_touch
-    never_touch=$(load_ralphy_boundaries "never_touch")
-    if [[ -n "$never_touch" ]]; then
-      prompt+="## Boundaries - Do NOT modify these files:
-$never_touch
-
-"
-    fi
-  fi
-
-  # Add context based on PRD source
-  case "$PRD_SOURCE" in
-    markdown)
-      prompt="@${PRD_FILE} @$PROGRESS_FILE"
-      ;;
-    yaml)
-      prompt="@${PRD_FILE} @$PROGRESS_FILE"
-      ;;
-    github)
-      # For GitHub issues, we include the issue body
-      local issue_body=""
-      if [[ -n "$task_override" ]]; then
-        issue_body=$(get_github_issue_body "$task_override")
-      fi
-      prompt="Task from GitHub Issue: $task_override
-
-Issue Description:
-$issue_body
-
-@$PROGRESS_FILE"
-      ;;
-  esac
-  
-  prompt="$prompt
-1. Find the highest-priority incomplete task and implement it."
-
-  local step=2
-  
-  if [[ "$SKIP_TESTS" == false ]]; then
-    prompt="$prompt
-$step. Write tests for the feature.
-$((step+1)). Run tests and ensure they pass before proceeding."
-    step=$((step+2))
-  fi
-
-  if [[ "$SKIP_LINT" == false ]]; then
-    prompt="$prompt
-$step. Run linting and ensure it passes before proceeding."
-    step=$((step+1))
-  fi
-
-  # Adjust completion step based on PRD source
-  case "$PRD_SOURCE" in
-    markdown)
-      prompt="$prompt
-$step. Update the PRD to mark the task as complete (change '- [ ]' to '- [x]')."
-      ;;
-    yaml)
-      prompt="$prompt
-$step. Update ${PRD_FILE} to mark the task as completed (set completed: true)."
-      ;;
-    github)
-      prompt="$prompt
-$step. The task will be marked complete automatically. Just note the completion in $PROGRESS_FILE."
-      ;;
-  esac
-
-  step=$((step+1))
-
-  prompt="$prompt
-$step. Append your progress to $PROGRESS_FILE.
-$((step+1)). Commit your changes with a descriptive message.
-ONLY WORK ON A SINGLE TASK."
-
-  if [[ "$SKIP_TESTS" == false ]]; then
-    prompt="$prompt Do not proceed if tests fail."
-  fi
-  if [[ "$SKIP_LINT" == false ]]; then
-    prompt="$prompt Do not proceed if linting fails."
-  fi
-
-  prompt="$prompt
-If ALL tasks in the PRD are complete, output <promise>COMPLETE</promise>."
-
-  echo "$prompt"
 }
 
 # ============================================
@@ -1728,7 +1547,7 @@ run_single_task() {
 
   # Build the prompt
   local prompt
-  prompt=$(build_prompt "$current_task")
+  prompt=$(build_beads_prompt "$current_task")
 
   if [[ "$DRY_RUN" == true ]]; then
     log_info "DRY RUN - Would execute:"
@@ -1841,11 +1660,6 @@ run_single_task() {
     if [[ "$AI_ENGINE" == "codex" ]] && [[ -n "$CODEX_LAST_MESSAGE_FILE" ]]; then
       rm -f "$CODEX_LAST_MESSAGE_FILE"
       CODEX_LAST_MESSAGE_FILE=""
-    fi
-
-    # Mark task complete for GitHub issues (since AI can't do it)
-    if [[ "$PRD_SOURCE" == "github" ]]; then
-      mark_task_complete "$current_task"
     fi
 
     # Create PR if requested
@@ -1975,15 +1789,9 @@ run_parallel_agent() {
   fi
   
   echo "running" > "$status_file"
-  
-  # Copy PRD file to worktree from original directory
-  if [[ "$PRD_SOURCE" == "markdown" ]] || [[ "$PRD_SOURCE" == "yaml" ]]; then
-    cp "$ORIGINAL_DIR/$PRD_FILE" "$worktree_dir/" 2>/dev/null || true
-  fi
-  
-  # Ensure .ralphy/ and progress.txt exist in worktree
+
+  # Ensure .ralphy/ directory exists in worktree
   mkdir -p "$worktree_dir/$RALPHY_DIR"
-  touch "$worktree_dir/$PROGRESS_FILE"
 
   # Build prompt for this specific task
   local prompt="You are working on a specific task. Focus ONLY on this task:
@@ -1993,10 +1801,9 @@ TASK: $task_name
 Instructions:
 1. Implement this specific task completely
 2. Write tests if appropriate
-3. Update $PROGRESS_FILE with what you did
-4. Commit your changes with a descriptive message
+3. Commit your changes with a descriptive message
 
-Do NOT modify PRD.md or mark tasks complete - that will be handled separately.
+When THIS TASK is complete, output <promise>COMPLETE</promise>
 Focus only on implementing: $task_name"
 
   # Temp file for AI output
@@ -2180,33 +1987,38 @@ run_parallel_tasks() {
   integration_branches=()  # Reset for this run
 
   # Export variables needed by subshell agents
-  export AI_ENGINE MAX_RETRIES RETRY_DELAY PRD_SOURCE PRD_FILE CREATE_PR PR_DRAFT
+  export AI_ENGINE MAX_RETRIES RETRY_DELAY BEADS_LABEL CREATE_PR PR_DRAFT
 
   local batch_num=0
   local completed_branches=()
-  local groups=("all")
+  local tracks=()
 
-  if [[ "$PRD_SOURCE" == "yaml" ]]; then
-    groups=()
-    while IFS= read -r group; do
-      [[ -n "$group" ]] && groups+=("$group")
-    done < <(yq -r '.tasks[] | select(.completed != true) | (.parallel_group // 0)' "$PRD_FILE" 2>/dev/null | sort -n | uniq)
-  fi
+  # Get BV execution tracks
+  while IFS= read -r track; do
+    [[ -n "$track" ]] && tracks+=("$track")
+  done < <(get_beads_parallel_tracks)
 
-  for group in "${groups[@]}"; do
+  log_info "Found ${#tracks[@]} execution tracks"
+
+  for track in "${tracks[@]}"; do
     local tasks=()
-    local group_label=""
-    local group_completed_branches=()  # Track branches completed in this group
+    local track_label=" (track $track)"
+    local group_completed_branches=()  # Track branches completed in this track
 
-    if [[ "$PRD_SOURCE" == "yaml" ]]; then
-      while IFS= read -r task; do
-        [[ -n "$task" ]] && tasks+=("$task")
-      done < <(get_tasks_in_group_yaml "$group")
-      [[ ${#tasks[@]} -eq 0 ]] && continue
-      group_label=" (group $group)"
-    else
-      tasks=("${all_tasks[@]}")
-    fi
+    log_info "Processing execution track $track..."
+
+    # Get all tasks in this track
+    while IFS= read -r task; do
+      [[ -n "$task" ]] && tasks+=("$task")
+    done < <(get_tasks_in_track_beads "$track")
+
+    [[ ${#tasks[@]} -eq 0 ]] && continue
+    log_info "Track $track has ${#tasks[@]} tasks"
+
+    # Mark all tasks in track as in_progress
+    for task in "${tasks[@]}"; do
+      mark_task_in_progress_beads "$task"
+    done
 
     local batch_start=0
     local total_group_tasks=${#tasks[@]}
@@ -2219,7 +2031,7 @@ run_parallel_tasks() {
 
       echo ""
       echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-      echo "${BOLD}Batch $batch_num${group_label}: Spawning $batch_size parallel agents${RESET}"
+      echo "${BOLD}Batch $batch_num${track_label}: Spawning $batch_size parallel agents${RESET}"
       echo "${DIM}Each agent runs in its own git worktree with isolated workspace${RESET}"
       echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
       echo ""
@@ -2354,14 +2166,8 @@ run_parallel_tasks() {
               branch_info=" → ${CYAN}$branch${RESET}"
             fi
 
-            # Mark task complete in PRD
-            if [[ "$PRD_SOURCE" == "markdown" ]]; then
-              mark_task_complete_markdown "$task"
-            elif [[ "$PRD_SOURCE" == "yaml" ]]; then
-              mark_task_complete_yaml "$task"
-            elif [[ "$PRD_SOURCE" == "github" ]]; then
-              mark_task_complete_github "$task"
-            fi
+            # Mark task complete in beads
+            mark_task_complete_beads "$task"
             ;;
           failed)
             icon="✗"
@@ -2402,12 +2208,16 @@ run_parallel_tasks() {
       fi
     done
 
-    # After each parallel_group completes, merge branches into integration branch
-    # so the next group sees the completed work (fixes issue #13)
+    # Sync beads state after track completes
+    log_info "Track $track complete - syncing to remote..."
+    bd sync 2>&1 | grep -v '^$' || log_warn "bd sync failed (non-fatal)"
+
+    # After each track completes, merge branches into integration branch
+    # so the next track sees the completed work (fixes issue #13)
     # NOTE: Uses git branch instead of git checkout to avoid changing HEAD while worktrees are active (Greptile review)
-    if [[ "$PRD_SOURCE" == "yaml" ]] && [[ ${#group_completed_branches[@]} -gt 0 ]] && [[ ${#groups[@]} -gt 1 ]]; then
-      local integration_branch="ralphy/integration-group-$group"
-      log_info "Creating integration branch for group $group: $integration_branch"
+    if [[ ${#group_completed_branches[@]} -gt 0 ]] && [[ ${#tracks[@]} -gt 1 ]]; then
+      local integration_branch="ralphy/integration-track-$track"
+      log_info "Creating integration branch for track $track: $integration_branch"
 
       # Create integration branch from current BASE_BRANCH without switching HEAD
       # This avoids state confusion while worktrees are active
@@ -2437,23 +2247,23 @@ run_parallel_tasks() {
           fi
 
           if [[ "$merge_failed" == false ]]; then
-            # Update BASE_BRANCH for next group
+            # Update BASE_BRANCH for next track
             BASE_BRANCH="$integration_branch"
             export BASE_BRANCH
             integration_branches+=("$integration_branch")  # Track for cleanup
-            log_info "Updated BASE_BRANCH to $integration_branch for next group"
+            log_info "Updated BASE_BRANCH to $integration_branch for next track"
           else
             # Delete failed integration branch
             git branch -D "$integration_branch" >/dev/null 2>&1 || true
-            log_warn "Integration merge failed; next group will branch from current BASE_BRANCH ($BASE_BRANCH)"
+            log_warn "Integration merge failed; next track will branch from current BASE_BRANCH ($BASE_BRANCH)"
           fi
         else
           # Couldn't checkout, clean up the branch
           git branch -D "$integration_branch" >/dev/null 2>&1 || true
-          log_warn "Could not checkout integration branch; next group will branch from current BASE_BRANCH ($BASE_BRANCH)"
+          log_warn "Could not checkout integration branch; next track will branch from current BASE_BRANCH ($BASE_BRANCH)"
         fi
       else
-        log_warn "Could not create integration branch; next group will branch from current BASE_BRANCH ($BASE_BRANCH)"
+        log_warn "Could not create integration branch; next track will branch from current BASE_BRANCH ($BASE_BRANCH)"
       fi
     fi
 
@@ -2461,7 +2271,11 @@ run_parallel_tasks() {
       break
     fi
   done
-  
+
+  # Final sync after all tracks complete
+  log_info "All tracks complete - final sync..."
+  bd sync 2>&1 | grep -v '^$' || log_warn "bd sync failed (non-fatal)"
+
   # Cleanup worktree base
   if ! find "$WORKTREE_BASE" -maxdepth 1 -type d -name 'agent-*' -print -quit 2>/dev/null | grep -q .; then
     rm -rf "$WORKTREE_BASE" 2>/dev/null || true
@@ -2685,7 +2499,7 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
 show_summary() {
   echo ""
   echo "${BOLD}============================================${RESET}"
-  echo "${GREEN}PRD complete!${RESET} Finished $iteration task(s)."
+  echo "${GREEN}All tasks complete!${RESET} Finished $iteration task(s)."
   echo "${BOLD}============================================${RESET}"
   echo ""
   echo "${BOLD}>>> Cost Summary${RESET}"
@@ -2821,7 +2635,7 @@ main() {
 
   # Show banner
   echo "${BOLD}============================================${RESET}"
-  echo "${BOLD}Ralphy${RESET} - Running until PRD is complete"
+  echo "${BOLD}Beads-Ralphy${RESET} - Running until all tasks are complete"
   local engine_display
   case "$AI_ENGINE" in
     opencode) engine_display="${CYAN}OpenCode${RESET}" ;;
@@ -2832,7 +2646,7 @@ main() {
     *) engine_display="${MAGENTA}Claude Code${RESET}" ;;
   esac
   echo "Engine: $engine_display"
-  echo "Source: ${CYAN}$PRD_SOURCE${RESET} (${PRD_FILE:-$GITHUB_REPO})"
+  echo "Source: ${CYAN}beads${RESET} (label: ${BEADS_LABEL:-ralph})"
   if [[ -d "$RALPHY_DIR" ]]; then
     echo "Config: ${GREEN}$RALPHY_DIR/${RESET} (rules loaded)"
   fi
