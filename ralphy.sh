@@ -1145,8 +1145,6 @@ run_single_task() {
   local task_name="${1:-}"
   local task_num="${2:-$iteration}"
   
-  log_debug "run_single_task called: task_name='$task_name', task_num=$task_num"
-  
   retry_count=0
   
   echo ""
@@ -2135,9 +2133,6 @@ main() {
   fi
   echo "${BOLD}============================================${RESET}"
 
-  # Debug output
-  echo "[DEBUG] About to start main loop, PARALLEL=$PARALLEL" >&2
-
   # Run in parallel or sequential mode
   if [[ "$PARALLEL" == true ]]; then
     run_parallel_tasks
@@ -2147,7 +2142,6 @@ main() {
   fi
 
   # Sequential main loop
-  echo "[DEBUG] Entering main loop" >&2
   while true; do
     ((iteration++)) || true
     local result_code=0
