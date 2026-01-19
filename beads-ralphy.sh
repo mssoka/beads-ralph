@@ -1165,10 +1165,10 @@ get_beads_parallel_tracks() {
   # Filter BV tracks to only include labeled tasks
   bv --robot-triage-by-track 2>/dev/null | \
     jq -r --argjson ids "$(echo "$task_ids" | jq -R . | jq -s .)" \
-      '.triage.recommendations_by_track | to_entries |
-       map(select(.value[].id | IN($ids[]))) |
-       map(.key) | .[]' | \
-    sort -n | uniq || echo "0"
+      '.triage.recommendations_by_track[] |
+       select(.recommendations | map(.id) | any(IN($ids[]))) |
+       .track_id' | \
+    sort | uniq || echo "track-A"
 }
 
 get_tasks_in_track_beads() {
@@ -1186,7 +1186,9 @@ get_tasks_in_track_beads() {
   # Get tasks in track that have the label
   bv --robot-triage-by-track 2>/dev/null | \
     jq -r --arg track "$track" --argjson ids "$(echo "$task_ids" | jq -R . | jq -s .)" \
-      ".triage.recommendations_by_track[\$track][] |
+      ".triage.recommendations_by_track[] |
+       select(.track_id == \$track) |
+       .recommendations[] |
        select(.id | IN(\$ids[])) |
        .id + \":\" + .title" || true
 }
@@ -1611,9 +1613,10 @@ check_for_errors() {
 calculate_cost() {
   local input=$1
   local output=$2
-  
+
   if command -v bc &>/dev/null; then
-    echo "scale=4; ($input * 0.000003) + ($output * 0.000015)" | bc
+    # Claude Opus 4.5 pricing: $5/MTok input, $25/MTok output
+    echo "scale=4; ($input * 0.000005) + ($output * 0.000025)" | bc
   else
     echo "N/A"
   fi
@@ -2445,7 +2448,7 @@ run_parallel_tasks() {
       # If we used integration branches, the final integration branch contains all the work
       # We just need to merge the final integration branch into the original base
       if [[ ${#integration_branches[@]} -gt 0 ]]; then
-        local final_integration="${integration_branches[-1]}"  # Last integration branch
+        local final_integration="${integration_branches[${#integration_branches[@]}-1]}"  # Last integration branch (bash 3.2 compatible)
         echo "${BOLD}Merging integration branch into ${final_target}...${RESET}"
         echo ""
 
