@@ -1032,23 +1032,25 @@ cleanup() {
 # ============================================
 
 get_tasks_beads() {
-  # Get all open tasks with label filter
+  # Get all open tasks with label filter (exclude epics)
   local label_filter="${BEADS_LABEL:-ralph}"
 
   bv --robot-triage 2>/dev/null | \
     jq -r --arg label "$label_filter" '.triage.recommendations[] |
            select(.status == "open") |
+           select(.type != "epic") |
            select(.labels | index($label)) |
            .id + ":" + .title' || true
 }
 
 get_next_task_beads() {
-  # Get top-ranked task from BV triage
+  # Get top-ranked task from BV triage (exclude epics)
   local label_filter="${BEADS_LABEL:-ralph}"
 
   bv --robot-triage 2>/dev/null | \
     jq -r --arg label "$label_filter" '.triage.recommendations[] |
            select(.status == "open") |
+           select(.type != "epic") |
            select(.labels | index($label)) |
            .id + ":" + .title' | \
     head -1 | cut -c1-70 || echo ""
@@ -1088,6 +1090,67 @@ mark_task_in_progress_beads() {
   bd update "$task_id" --status=in_progress 2>&1 | grep -v '^$' || true
 }
 
+check_and_close_parent_epic() {
+  local task_id=$1
+
+  # Check if task has a parent (contains a dot)
+  if [[ ! "$task_id" =~ \. ]]; then
+    return 0
+  fi
+
+  # Extract parent epic ID (everything before the last dot)
+  local epic_id="${task_id%.*}"
+
+  log_debug "Checking if parent epic $epic_id should be closed"
+
+  # Get all children of this epic
+  local all_children=$(bd list --json 2>/dev/null | \
+    jq -r --arg epic "$epic_id" '[.[] | select(.id | startswith($epic + "."))] | length' 2>/dev/null)
+
+  if [[ -z "$all_children" ]] || [[ "$all_children" == "0" ]]; then
+    log_debug "No children found for epic $epic_id"
+    return 0
+  fi
+
+  # Get count of open children
+  local open_children=$(bd list --json 2>/dev/null | \
+    jq -r --arg epic "$epic_id" '[.[] | select(.id | startswith($epic + ".")) | select(.status == "open")] | length' 2>/dev/null)
+
+  if [[ "$open_children" == "0" ]]; then
+    log_info "All children of epic $epic_id are closed, closing epic"
+    bd close "$epic_id" 2>&1 | grep -v '^$' || true
+  else
+    log_debug "Epic $epic_id has $open_children open children remaining"
+  fi
+}
+
+cleanup_all_completed_epics() {
+  # Find all epics where all children are closed
+  log_debug "Running final epic cleanup"
+
+  local epics=$(bd list --json 2>/dev/null | \
+    jq -r '[.[] | select(.status == "open") | select(.id | test("^[^.]+$"))] | .[].id' 2>/dev/null)
+
+  while IFS= read -r epic_id; do
+    if [[ -n "$epic_id" ]]; then
+      # Check if this epic has any open children
+      local open_children=$(bd list --json 2>/dev/null | \
+        jq -r --arg epic "$epic_id" '[.[] | select(.id | startswith($epic + ".")) | select(.status == "open")] | length' 2>/dev/null)
+
+      if [[ "$open_children" == "0" ]]; then
+        # Check if epic has any children at all
+        local total_children=$(bd list --json 2>/dev/null | \
+          jq -r --arg epic "$epic_id" '[.[] | select(.id | startswith($epic + "."))] | length' 2>/dev/null)
+
+        if [[ "$total_children" != "0" ]]; then
+          log_info "Closing completed epic: $epic_id"
+          bd close "$epic_id" 2>&1 | grep -v '^$' || true
+        fi
+      fi
+    fi
+  done <<< "$epics"
+}
+
 get_beads_parallel_tracks() {
   # Get execution tracks for all open tasks with label
   local label_filter="${BEADS_LABEL:-ralph}"
@@ -1112,10 +1175,11 @@ get_tasks_in_track_beads() {
   local track=$1
   local label_filter="${BEADS_LABEL:-ralph}"
 
-  # Get task IDs with label
+  # Get task IDs with label (exclude epics)
   local task_ids=$(bv --robot-triage 2>/dev/null | \
     jq -r --arg label "$label_filter" '.triage.recommendations[] |
            select(.status == "open") |
+           select(.type != "epic") |
            select(.labels | index($label)) |
            .id')
 
@@ -1743,6 +1807,10 @@ run_single_task() {
         # Working directory is clean (ignoring .beads/ metadata), safe to mark complete
         log_debug "Working directory clean, marking task complete in beads"
         mark_task_complete "$current_task"
+
+        # Check if parent epic should be closed
+        local task_id=$(echo "$current_task" | cut -d: -f1)
+        check_and_close_parent_epic "$task_id"
       fi
     fi
 
@@ -2239,6 +2307,10 @@ run_parallel_tasks() {
 
             # Mark task complete in beads
             mark_task_complete_beads "$task"
+
+            # Check if parent epic should be closed
+            local task_id=$(echo "$task" | cut -d: -f1)
+            check_and_close_parent_epic "$task_id"
             ;;
           failed)
             icon="✗"
@@ -2740,6 +2812,7 @@ main() {
   # Run in parallel or sequential mode
   if [[ "$PARALLEL" == true ]]; then
     run_parallel_tasks
+    cleanup_all_completed_epics
     show_summary
     notify_done
     exit 0
@@ -2761,6 +2834,7 @@ main() {
         ;;
       2)
         # All tasks complete
+        cleanup_all_completed_epics
         show_summary
         notify_done
         exit 0
@@ -2774,6 +2848,7 @@ main() {
     # Check max iterations
     if [[ $MAX_ITERATIONS -gt 0 ]] && [[ $iteration -ge $MAX_ITERATIONS ]]; then
       log_warn "Reached max iterations ($MAX_ITERATIONS)"
+      cleanup_all_completed_epics
       show_summary
       notify_done "Ralphy stopped after $MAX_ITERATIONS iterations"
       exit 0
