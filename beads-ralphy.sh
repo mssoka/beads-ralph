@@ -24,8 +24,6 @@ ADD_RULE=""
 AUTO_COMMIT=true
 
 # Runtime options
-SKIP_TESTS=false
-SKIP_LINT=false
 AI_ENGINE="claude"  # claude, opencode, cursor, codex, qwen, or droid
 DRY_RUN=false
 MAX_ITERATIONS=0  # 0 = unlimited
@@ -680,11 +678,6 @@ ${BOLD}AI ENGINE OPTIONS:${RESET}
   --qwen              Use Qwen-Code
   --droid             Use Factory Droid
 
-${BOLD}WORKFLOW OPTIONS:${RESET}
-  --no-tests          Skip writing and running tests
-  --no-lint           Skip linting
-  --fast              Skip both tests and linting
-
 ${BOLD}EXECUTION OPTIONS:${RESET}
   --max-iterations N  Stop after N iterations (0 = unlimited)
   --max-retries N     Max retries per task on failure (default: 3)
@@ -742,19 +735,6 @@ show_version() {
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case $1 in
-      --no-tests|--skip-tests)
-        SKIP_TESTS=true
-        shift
-        ;;
-      --no-lint|--skip-lint)
-        SKIP_LINT=true
-        shift
-        ;;
-      --fast)
-        SKIP_TESTS=true
-        SKIP_LINT=true
-        shift
-        ;;
       --opencode)
         AI_ENGINE="opencode"
         shift
@@ -2746,8 +2726,6 @@ main() {
   fi
 
   local mode_parts=()
-  [[ "$SKIP_TESTS" == true ]] && mode_parts+=("no-tests")
-  [[ "$SKIP_LINT" == true ]] && mode_parts+=("no-lint")
   [[ "$DRY_RUN" == true ]] && mode_parts+=("dry-run")
   [[ "$PARALLEL" == true ]] && mode_parts+=("parallel:$MAX_PARALLEL")
   [[ "$BRANCH_PER_TASK" == true ]] && mode_parts+=("branch-per-task")
