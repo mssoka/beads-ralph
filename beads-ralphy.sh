@@ -278,6 +278,63 @@ EOF
   echo "  3. Run:        ${CYAN}beads-ralphy \"your task\"${RESET} or ${CYAN}beads-ralphy${RESET} (in beads project)"
 }
 
+# Validate .ralphy/config.yaml syntax and structure
+validate_config() {
+  # Return silently if no config (brownfield mode)
+  [[ ! -f "$CONFIG_FILE" ]] && return 0
+
+  # Check YAML syntax
+  if command -v yq &>/dev/null; then
+    if ! yq eval '.' "$CONFIG_FILE" >/dev/null 2>&1; then
+      log_error "Invalid YAML syntax in $CONFIG_FILE"
+      log_info "Run: yq eval '.' $CONFIG_FILE to see error"
+      exit 1
+    fi
+  elif command -v python3 &>/dev/null; then
+    # Fallback: use python to validate YAML
+    if ! python3 -c "import yaml; yaml.safe_load(open('$CONFIG_FILE'))" 2>/dev/null; then
+      log_error "Invalid YAML syntax in $CONFIG_FILE"
+      exit 1
+    fi
+  fi
+
+  # If yq available, do deeper validation
+  if command -v yq &>/dev/null; then
+    # Check for project.name (recommended field)
+    local project_name
+    project_name=$(yq -r '.project.name // ""' "$CONFIG_FILE" 2>/dev/null)
+    if [[ -z "$project_name" ]]; then
+      log_warn "Config missing 'project.name'. Run: beads-ralphy --init"
+    fi
+
+    # Validate known top-level keys
+    local known_keys=("project" "commands" "rules" "boundaries")
+    local actual_keys
+    actual_keys=$(yq -r 'keys | .[]' "$CONFIG_FILE" 2>/dev/null)
+
+    while IFS= read -r key; do
+      if [[ -n "$key" ]] && [[ ! " ${known_keys[*]} " =~ " ${key} " ]]; then
+        log_warn "Unknown config key: '$key' in $CONFIG_FILE"
+      fi
+    done <<< "$actual_keys"
+
+    # Validate glob patterns in boundaries.never_touch
+    local patterns
+    patterns=$(yq -r '.boundaries.never_touch // [] | .[]' "$CONFIG_FILE" 2>/dev/null)
+
+    if [[ -n "$patterns" ]]; then
+      while IFS= read -r pattern; do
+        # Basic validation: check for invalid glob chars
+        if [[ "$pattern" =~ [^a-zA-Z0-9/*._-] ]]; then
+          log_warn "Glob pattern may be invalid: '$pattern'"
+        fi
+      done <<< "$patterns"
+    fi
+  fi
+
+  return 0
+}
+
 # Load rules from config.yaml
 load_ralphy_rules() {
   [[ ! -f "$CONFIG_FILE" ]] && return
@@ -461,34 +518,21 @@ $never_touch
 "
   fi
 
-  # Add recently completed tasks for context
-  local recent_ids=$(bd list --status=closed --label "${BEADS_LABEL:-ralph}" --limit 5 --json 2>/dev/null | jq -r '.[].id' 2>/dev/null)
-  if [[ -n "$recent_ids" ]]; then
-    local has_context=false
-    local task_context=""
+  # Add instructions for fetching related task context
+  prompt+="## Related Task Context (Optional)
 
-    while IFS= read -r task_id; do
-      if [[ -n "$task_id" ]]; then
-        local task_details=$(bd show "$task_id" --json 2>/dev/null | jq -r '.[0]')
-        local task_title=$(echo "$task_details" | jq -r '.title // "Unknown"')
-        local task_notes=$(echo "$task_details" | jq -r '.notes // ""')
+If you need context from recently completed related tasks, run:
 
-        if [[ -n "$task_notes" ]]; then
-          task_context+="### $task_id: $task_title
-$task_notes
+  bv --robot-triage 2>/dev/null | jq -r '
+    .triage.recommendations[] |
+    select(.status == \"closed\") |
+    select(.labels | index(\"${BEADS_LABEL}\")) |
+    .id + \": \" + .title
+  ' | head -5
+
+These are PageRank-ordered closed tasks. Use 'bd show <id>' to read details.
 
 "
-          has_context=true
-        fi
-      fi
-    done <<< "$recent_ids"
-
-    if [[ "$has_context" == "true" ]]; then
-      prompt+="## Recently Completed Tasks (for context and patterns)
-
-$task_context"
-    fi
-  fi
 
   # Add task details
   prompt+="## Task: $task_id - $title
@@ -2645,6 +2689,8 @@ main() {
       exit 1
     fi
 
+    validate_config
+
     # Show brownfield banner
     echo "${BOLD}============================================${RESET}"
     echo "${BOLD}Ralphy${RESET} - Single Task Mode"
@@ -2679,6 +2725,7 @@ main() {
 
   # Check requirements
   check_requirements
+  validate_config
 
   # Show banner
   echo "${BOLD}============================================${RESET}"
