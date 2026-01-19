@@ -461,6 +461,35 @@ $never_touch
 "
   fi
 
+  # Add recently completed tasks for context
+  local recent_ids=$(bd list --status=closed --label "${BEADS_LABEL:-ralph}" --limit 5 --json 2>/dev/null | jq -r '.[].id' 2>/dev/null)
+  if [[ -n "$recent_ids" ]]; then
+    local has_context=false
+    local task_context=""
+
+    while IFS= read -r task_id; do
+      if [[ -n "$task_id" ]]; then
+        local task_details=$(bd show "$task_id" --json 2>/dev/null | jq -r '.[0]')
+        local task_title=$(echo "$task_details" | jq -r '.title // "Unknown"')
+        local task_notes=$(echo "$task_details" | jq -r '.notes // ""')
+
+        if [[ -n "$task_notes" ]]; then
+          task_context+="### $task_id: $task_title
+$task_notes
+
+"
+          has_context=true
+        fi
+      fi
+    done <<< "$recent_ids"
+
+    if [[ "$has_context" == "true" ]]; then
+      prompt+="## Recently Completed Tasks (for context and patterns)
+
+$task_context"
+    fi
+  fi
+
   # Add task details
   prompt+="## Task: $task_id - $title
 "
@@ -488,20 +517,25 @@ $acceptance
 
   prompt+="
 ## Instructions
-1. Implement the task following the design approach
-2. Verify all acceptance criteria are met
-3. Run tests if appropriate"
+1. Review recently completed tasks above for patterns and gotchas
+2. Implement the task following the design approach
+3. Verify all acceptance criteria are met
+4. Run tests if appropriate"
 
   # Add commit instruction only if auto-commit is enabled
+  local step_num=5
   if [[ "$AUTO_COMMIT" == "true" ]]; then
     prompt+="
-4. Commit your changes with a descriptive message"
+5. Commit your changes with a descriptive message"
+    step_num=6
   fi
 
   prompt+="
+$step_num. Update this task's notes with what you learned:
+   bd update $task_id --notes 'Brief summary of: patterns discovered, gotchas encountered, implementation approach'
 
 ## Completion Signal
-When THIS TASK is complete, output <promise>COMPLETE</promise>
+When THIS TASK is complete (after updating notes), output <promise>COMPLETE</promise>
 
 Keep changes focused and minimal. Do not refactor unrelated code."
 
@@ -1000,18 +1034,16 @@ count_remaining_beads() {
   # Count open tasks with label
   local label_filter="${BEADS_LABEL:-ralph}"
 
-  bv --robot-triage 2>/dev/null | \
+  bd list --status=open --limit 0 --json 2>/dev/null | \
     jq --arg label "$label_filter" \
-      '[.triage.recommendations[] |
-        select(.status == "open") |
-        select(.labels | index($label))] | length' || echo "0"
+      '[.[] | select(.labels | index($label))] | length' || echo "0"
 }
 
 count_completed_beads() {
   # Count closed tasks with label
   local label_filter="${BEADS_LABEL:-ralph}"
 
-  bd list --status=closed --json 2>/dev/null | \
+  bd list --status=closed --limit 0 --json 2>/dev/null | \
     jq --arg label "$label_filter" \
       '[.[] | select(.labels | index($label))] | length' || echo "0"
 }
