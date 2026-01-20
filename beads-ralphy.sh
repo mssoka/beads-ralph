@@ -83,24 +83,74 @@ ORIGINAL_BASE_BRANCH=""  # Original base branch before integration branches
 # ============================================
 
 log_info() {
-  echo "${BLUE}[INFO]${RESET} $*"
+  echo "${BLUE}ℹ${RESET} $*"
 }
 
 log_success() {
-  echo "${GREEN}[OK]${RESET} $*"
+  echo "${GREEN}✓${RESET} $*"
 }
 
 log_warn() {
-  echo "${YELLOW}[WARN]${RESET} $*"
+  echo "${YELLOW}⚠${RESET} $*"
 }
 
 log_error() {
-  echo "${RED}[ERROR]${RESET} $*" >&2
+  echo "${RED}✗${RESET} $*" >&2
 }
 
 log_debug() {
   if [[ "$VERBOSE" == true ]]; then
-    echo "${DIM}[DEBUG] $*${RESET}"
+    echo "${DIM}• $*${RESET}"
+  fi
+}
+
+# Show progress bar
+show_progress_bar() {
+  local completed=$1
+  local total=$2
+  local bar_width=16
+
+  if [[ $total -eq 0 ]]; then
+    return
+  fi
+
+  local filled=$((completed * bar_width / total))
+  local empty=$((bar_width - filled))
+  local percent=$((completed * 100 / total))
+
+  printf "  ${DIM}Progress:${RESET} ${GREEN}"
+  printf '█%.0s' $(seq 1 $filled)
+  printf "${DIM}"
+  printf '░%.0s' $(seq 1 $empty)
+  printf "${RESET} ${CYAN}%d/%d${RESET} ${DIM}(%d%%)${RESET}\n" $completed $total $percent
+}
+
+# Format large numbers with K suffix
+format_token_count() {
+  local num=$1
+  if [[ $num -ge 1000 ]]; then
+    local k=$((num / 1000))
+    local remainder=$((num % 1000))
+    local decimal=$((remainder / 100))
+    echo "${k}.${decimal}K"
+  else
+    echo "$num"
+  fi
+}
+
+# Extract token info from output file
+extract_token_info() {
+  local file=$1
+  # Parse JSON output for token counts
+  local input_tokens=$(grep '"input_tokens"' "$file" 2>/dev/null | tail -1 | grep -o '[0-9]\+' || echo "0")
+  local output_tokens=$(grep '"output_tokens"' "$file" 2>/dev/null | tail -1 | grep -o '[0-9]\+' || echo "0")
+
+  if [[ $input_tokens -gt 0 ]] || [[ $output_tokens -gt 0 ]]; then
+    local input_fmt=$(format_token_count "$input_tokens")
+    local output_fmt=$(format_token_count "$output_tokens")
+    echo "[${input_fmt}→${output_fmt} tokens]"
+  else
+    echo ""
   fi
 }
 
@@ -360,63 +410,100 @@ show_ralphy_config() {
   fi
 
   echo ""
-  echo "${BOLD}Ralphy Configuration${RESET} ($CONFIG_FILE)"
-  echo ""
+  echo "${BOLD}╭─ Ralphy Configuration ────────────────────────────────────────╮${RESET}"
+  echo "${BOLD}│${RESET}"
 
   if command -v yq &>/dev/null; then
-    # Project info
-    local name lang framework desc
-    name=$(yq -r '.project.name // "Unknown"' "$CONFIG_FILE" 2>/dev/null)
-    lang=$(yq -r '.project.language // "Unknown"' "$CONFIG_FILE" 2>/dev/null)
-    framework=$(yq -r '.project.framework // ""' "$CONFIG_FILE" 2>/dev/null)
-    desc=$(yq -r '.project.description // ""' "$CONFIG_FILE" 2>/dev/null)
+    # Project section
+    echo "${BOLD}│${RESET}  ${CYAN}📦 Project${RESET}"
+    local name=$(yq -r '.project.name // ""' "$CONFIG_FILE" 2>/dev/null)
+    local lang=$(yq -r '.project.language // ""' "$CONFIG_FILE" 2>/dev/null)
+    local framework=$(yq -r '.project.framework // ""' "$CONFIG_FILE" 2>/dev/null)
 
-    echo "${BOLD}Project:${RESET}"
-    echo "  Name:      $name"
-    echo "  Language:  $lang"
-    [[ -n "$framework" ]] && echo "  Framework: $framework"
-    [[ -n "$desc" ]] && echo "  About:     $desc"
-    echo ""
+    [[ -n "$name" ]] && echo "${BOLD}│${RESET}  ${DIM}├─ Name:       ${RESET}$name"
+    [[ -n "$lang" ]] && echo "${BOLD}│${RESET}  ${DIM}├─ Language:   ${RESET}$lang"
+    [[ -n "$framework" ]] && echo "${BOLD}│${RESET}  ${DIM}└─ Framework:  ${RESET}$framework"
 
-    # Commands
-    local test_cmd lint_cmd build_cmd
-    test_cmd=$(yq -r '.commands.test // ""' "$CONFIG_FILE" 2>/dev/null)
-    lint_cmd=$(yq -r '.commands.lint // ""' "$CONFIG_FILE" 2>/dev/null)
-    build_cmd=$(yq -r '.commands.build // ""' "$CONFIG_FILE" 2>/dev/null)
+    # Commands section
+    echo "${BOLD}│${RESET}"
+    echo "${BOLD}│${RESET}  ${CYAN}⚙️  Commands${RESET}"
+    local test_cmd=$(yq -r '.commands.test // ""' "$CONFIG_FILE" 2>/dev/null)
+    local lint_cmd=$(yq -r '.commands.lint // ""' "$CONFIG_FILE" 2>/dev/null)
+    local build_cmd=$(yq -r '.commands.build // ""' "$CONFIG_FILE" 2>/dev/null)
 
-    echo "${BOLD}Commands:${RESET}"
-    [[ -n "$test_cmd" ]] && echo "  Test:  $test_cmd" || echo "  Test:  ${DIM}(not set)${RESET}"
-    [[ -n "$lint_cmd" ]] && echo "  Lint:  $lint_cmd" || echo "  Lint:  ${DIM}(not set)${RESET}"
-    [[ -n "$build_cmd" ]] && echo "  Build: $build_cmd" || echo "  Build: ${DIM}(not set)${RESET}"
-    echo ""
+    local has_test=false
+    local has_lint=false
+    local has_build=false
+    [[ -n "$test_cmd" ]] && has_test=true
+    [[ -n "$lint_cmd" ]] && has_lint=true
+    [[ -n "$build_cmd" ]] && has_build=true
 
-    # Rules
-    echo "${BOLD}Rules:${RESET}"
-    local rules
-    rules=$(yq -r '.rules // [] | .[]' "$CONFIG_FILE" 2>/dev/null)
-    if [[ -n "$rules" ]]; then
-      echo "$rules" | while read -r rule; do
-        echo "  • $rule"
-      done
-    else
-      echo "  ${DIM}(none - add with: ralphy --add-rule \"...\")${RESET}"
+    if [[ "$has_test" == true ]]; then
+      if [[ "$has_lint" == true ]] || [[ "$has_build" == true ]]; then
+        echo "${BOLD}│${RESET}  ${DIM}├─ Test:   ${RESET}$test_cmd"
+      else
+        echo "${BOLD}│${RESET}  ${DIM}└─ Test:   ${RESET}$test_cmd"
+      fi
     fi
-    echo ""
 
-    # Boundaries
-    local never_touch
-    never_touch=$(yq -r '.boundaries.never_touch // [] | .[]' "$CONFIG_FILE" 2>/dev/null)
-    if [[ -n "$never_touch" ]]; then
-      echo "${BOLD}Never Touch:${RESET}"
-      echo "$never_touch" | while read -r path; do
-        echo "  • $path"
+    if [[ "$has_lint" == true ]]; then
+      if [[ "$has_build" == true ]]; then
+        echo "${BOLD}│${RESET}  ${DIM}├─ Lint:   ${RESET}$lint_cmd"
+      else
+        echo "${BOLD}│${RESET}  ${DIM}└─ Lint:   ${RESET}$lint_cmd"
+      fi
+    fi
+
+    [[ "$has_build" == true ]] && echo "${BOLD}│${RESET}  ${DIM}└─ Build:  ${RESET}$build_cmd"
+
+    # Rules section
+    local rules_count=$(yq -r '.rules // [] | length' "$CONFIG_FILE" 2>/dev/null)
+    if [[ "$rules_count" -gt 0 ]]; then
+      echo "${BOLD}│${RESET}"
+      echo "${BOLD}│${RESET}  ${CYAN}📋 Rules ($rules_count)${RESET}"
+
+      local rules_json=$(yq -r '.rules // []' "$CONFIG_FILE" 2>/dev/null)
+      local i=0
+      while [[ $i -lt $rules_count ]]; do
+        local rule=$(echo "$rules_json" | yq -r ".[$i]" 2>/dev/null)
+        if [[ $((i + 1)) -eq $rules_count ]]; then
+          echo "${BOLD}│${RESET}  ${DIM}└─ $rule${RESET}"
+        else
+          echo "${BOLD}│${RESET}  ${DIM}├─ $rule${RESET}"
+        fi
+        ((i++))
       done
-      echo ""
+    fi
+
+    # Boundaries section
+    local never_touch_count=$(yq -r '.boundaries.never_touch // [] | length' "$CONFIG_FILE" 2>/dev/null)
+    if [[ "$never_touch_count" -gt 0 ]]; then
+      echo "${BOLD}│${RESET}"
+      echo "${BOLD}│${RESET}  ${CYAN}🚫 Never Touch ($never_touch_count)${RESET}"
+
+      local boundaries_json=$(yq -r '.boundaries.never_touch // []' "$CONFIG_FILE" 2>/dev/null)
+      local i=0
+      while [[ $i -lt $never_touch_count ]]; do
+        local path=$(echo "$boundaries_json" | yq -r ".[$i]" 2>/dev/null)
+        if [[ $((i + 1)) -eq $never_touch_count ]]; then
+          echo "${BOLD}│${RESET}  ${DIM}└─ $path${RESET}"
+        else
+          echo "${BOLD}│${RESET}  ${DIM}├─ $path${RESET}"
+        fi
+        ((i++))
+      done
     fi
   else
     # Fallback: just show the file
-    cat "$CONFIG_FILE"
+    echo "${BOLD}│${RESET}  ${DIM}(yq not installed - showing raw YAML)${RESET}"
+    echo "${BOLD}│${RESET}"
+    cat "$CONFIG_FILE" | while IFS= read -r line; do
+      echo "${BOLD}│${RESET}  $line"
+    done
   fi
+
+  echo "${BOLD}│${RESET}"
+  echo "${BOLD}╰───────────────────────────────────────────────────────────────╯${RESET}"
 }
 
 # Add a rule to config.yaml
@@ -1152,45 +1239,133 @@ cleanup_all_completed_epics() {
 }
 
 get_beads_parallel_tracks() {
-  # Get execution tracks for all open tasks with label
+  # Get execution tracks based on dependency depth using robot-graph
+  # This replaces BV's broken track algorithm with proper parallel grouping
   local label_filter="${BEADS_LABEL:-ralph}"
 
-  # Get task IDs with label
-  local task_ids=$(bv --robot-triage 2>/dev/null | \
-    jq -r --arg label "$label_filter" '.triage.recommendations[] |
-           select(.status == "open") |
-           select(.labels | index($label)) |
-           .id')
+  bv --robot-graph 2>/dev/null | \
+    jq -r --arg label "$label_filter" '
+      .adjacency.nodes as $all_nodes |
+      .adjacency.edges as $all_edges |
 
-  # Filter BV tracks to only include labeled tasks
-  bv --robot-triage-by-track 2>/dev/null | \
-    jq -r --argjson ids "$(echo "$task_ids" | jq -R . | jq -s .)" \
-      '.triage.recommendations_by_track[] |
-       select(.recommendations | map(.id) | any(IN($ids[]))) |
-       .track_id' | \
-    sort | uniq || echo "track-A"
+      [$all_nodes[] | select(.status == "open" and (.labels // [] | contains([$label])))] |
+
+      map({
+        id: .id,
+        title: .title,
+        blocker_count: (
+          .id as $task_id |
+          [$all_edges[] |
+            select(.type == "blocks" and .to == $task_id) |
+            .from as $blocker |
+            $all_nodes[] |
+            select(.id == $blocker and .status == "open")
+          ] | length
+        )
+      }) |
+
+      group_by(.blocker_count) | map(.[0].blocker_count) | .[] | "track-\(.)"
+    ' || echo "track-0"
+}
+
+get_beads_parallel_tracks_cached() {
+  # Get execution tracks using cached graph data (avoids inconsistency from multiple BV calls)
+  # Args: $1 = bv_graph_json
+  local bv_graph_json=$1
+  local label_filter="${BEADS_LABEL:-ralph}"
+
+  echo "$bv_graph_json" | \
+    jq -r --arg label "$label_filter" '
+      .adjacency.nodes as $all_nodes |
+      .adjacency.edges as $all_edges |
+
+      [$all_nodes[] | select(.status == "open" and (.labels // [] | contains([$label])))] |
+
+      map({
+        id: .id,
+        title: .title,
+        blocker_count: (
+          .id as $task_id |
+          [$all_edges[] |
+            select(.type == "blocks" and .to == $task_id) |
+            .from as $blocker |
+            $all_nodes[] |
+            select(.id == $blocker and .status == "open")
+          ] | length
+        )
+      }) |
+
+      group_by(.blocker_count) | map(.[0].blocker_count) | .[] | "track-\(.)"
+    ' || echo "track-0"
 }
 
 get_tasks_in_track_beads() {
   local track=$1
   local label_filter="${BEADS_LABEL:-ralph}"
 
-  # Get task IDs with label (exclude epics)
-  local task_ids=$(bv --robot-triage 2>/dev/null | \
-    jq -r --arg label "$label_filter" '.triage.recommendations[] |
-           select(.status == "open") |
-           select(.type != "epic") |
-           select(.labels | index($label)) |
-           .id')
+  # Extract track number from track-N format
+  local track_num="${track#track-}"
 
-  # Get tasks in track that have the label
-  bv --robot-triage-by-track 2>/dev/null | \
-    jq -r --arg track "$track" --argjson ids "$(echo "$task_ids" | jq -R . | jq -s .)" \
-      ".triage.recommendations_by_track[] |
-       select(.track_id == \$track) |
-       .recommendations[] |
-       select(.id | IN(\$ids[])) |
-       .id + \":\" + .title" || true
+  bv --robot-graph 2>/dev/null | \
+    jq -r --arg label "$label_filter" --arg track_num "$track_num" '
+      .adjacency.nodes as $all_nodes |
+      .adjacency.edges as $all_edges |
+
+      [$all_nodes[] |
+        select(.status == "open" and
+               (((.type // "task") == "epic") | not) and
+               (.labels // [] | contains([$label])))] |
+
+      map({
+        id: .id,
+        title: .title,
+        blocker_count: (
+          .id as $task_id |
+          [$all_edges[] |
+            select(.type == "blocks" and .to == $task_id) |
+            .from as $blocker |
+            $all_nodes[] |
+            select(.id == $blocker and .status == "open")
+          ] | length
+        )
+      }) | .[] | select(.blocker_count == ($track_num | tonumber)) | .id + ":" + .title
+    ' || true
+}
+
+get_tasks_in_track_beads_cached() {
+  # Get tasks in a specific track using cached graph data (avoids inconsistency from multiple BV calls)
+  # Args: $1 = track, $2 = bv_graph_json
+  local track=$1
+  local bv_graph_json=$2
+  local label_filter="${BEADS_LABEL:-ralph}"
+
+  # Extract track number from track-N format
+  local track_num="${track#track-}"
+
+  echo "$bv_graph_json" | \
+    jq -r --arg label "$label_filter" --arg track_num "$track_num" '
+      .adjacency.nodes as $all_nodes |
+      .adjacency.edges as $all_edges |
+
+      [$all_nodes[] |
+        select(.status == "open" and
+               (((.type // "task") == "epic") | not) and
+               (.labels // [] | contains([$label])))] |
+
+      map({
+        id: .id,
+        title: .title,
+        blocker_count: (
+          .id as $task_id |
+          [$all_edges[] |
+            select(.type == "blocks" and .to == $task_id) |
+            .from as $blocker |
+            $all_nodes[] |
+            select(.id == $blocker and .status == "open")
+          ] | length
+        )
+      }) | .[] | select(.blocker_count == ($track_num | tonumber)) | .id + ":" + .title
+    ' || true
 }
 
 # ============================================
@@ -1633,15 +1808,22 @@ run_single_task() {
   retry_count=0
   
   echo ""
-  echo "${BOLD}>>> Task $task_num${RESET}"
-  
-  local remaining completed
+  echo "${BOLD}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+
+  # Calculate progress
+  local remaining completed total
   remaining=$(count_remaining_tasks | tr -d '[:space:]')
   completed=$(count_completed_tasks | tr -d '[:space:]')
   remaining=${remaining:-0}
   completed=${completed:-0}
-  echo "${DIM}    Completed: $completed | Remaining: $remaining${RESET}"
-  echo "--------------------------------------------"
+  total=$((remaining + completed))
+
+  # Task number and progress
+  if [[ $total -gt 0 ]]; then
+    echo "${BOLD}┃${RESET} ${CYAN}Task $task_num of $total${RESET}"
+  else
+    echo "${BOLD}┃${RESET} ${CYAN}Task $task_num${RESET}"
+  fi
 
   # Get current task for display
   local current_task
@@ -1649,6 +1831,19 @@ run_single_task() {
     current_task="$task_name"
   else
     current_task=$(get_next_task)
+  fi
+
+  # Task title (first 60 chars)
+  if [[ -n "$current_task" ]]; then
+    local task_title="${current_task:0:60}"
+    echo "${BOLD}┃${RESET} $task_title"
+  fi
+
+  echo "${BOLD}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+
+  # Show progress bar if we have totals
+  if [[ $total -gt 0 ]]; then
+    show_progress_bar "$completed" "$total"
   fi
   
   if [[ -z "$current_task" ]]; then
@@ -1914,12 +2109,16 @@ run_parallel_agent() {
   echo "WORKTREE_BASE=$WORKTREE_BASE" >> "$log_file"
   echo "BASE_BRANCH=$BASE_BRANCH" >> "$log_file"
   
+  # Disable beads daemon BEFORE creating worktree to prevent commits to wrong branch
+  export BEADS_NO_DAEMON=1
+  echo "Beads daemon disabled (BEADS_NO_DAEMON=1) for parallel mode safety" >> "$log_file"
+
   # Create isolated worktree for this agent
   local worktree_info
   worktree_info=$(create_agent_worktree "$task_name" "$agent_num" 2>>"$log_file")
   local worktree_dir="${worktree_info%%|*}"
   local branch_name="${worktree_info##*|}"
-  
+
   echo "Worktree dir: $worktree_dir" >> "$log_file"
   echo "Branch name: $branch_name" >> "$log_file"
   
@@ -1956,7 +2155,7 @@ Focus only on implementing: $task_name"
   local result=""
   local success=false
   local retry=0
-  
+
   while [[ $retry -lt $MAX_RETRIES ]]; do
     case "$AI_ENGINE" in
       opencode)
@@ -2135,10 +2334,14 @@ run_parallel_tasks() {
   local completed_branches=()
   local tracks=()
 
-  # Get BV execution tracks
+  # Cache BV graph output once to avoid inconsistency from multiple calls
+  log_debug "Caching BV graph data..."
+  local bv_graph_cache=$(bv --robot-graph 2>/dev/null || echo '{"adjacency":{"nodes":[],"edges":[]}}')
+
+  # Get BV execution tracks using cached graph data
   while IFS= read -r track; do
     [[ -n "$track" ]] && tracks+=("$track")
-  done < <(get_beads_parallel_tracks)
+  done < <(get_beads_parallel_tracks_cached "$bv_graph_cache")
 
   log_info "Found ${#tracks[@]} execution tracks"
 
@@ -2149,10 +2352,10 @@ run_parallel_tasks() {
 
     log_info "Processing execution track $track..."
 
-    # Get all tasks in this track
+    # Get all tasks in this track using cached graph data
     while IFS= read -r task; do
       [[ -n "$task" ]] && tasks+=("$task")
-    done < <(get_tasks_in_track_beads "$track")
+    done < <(get_tasks_in_track_beads_cached "$track" "$bv_graph_cache")
 
     [[ ${#tasks[@]} -eq 0 ]] && continue
     log_info "Track $track has ${#tasks[@]} tasks"
@@ -2172,10 +2375,10 @@ run_parallel_tasks() {
       local batch_size=$((batch_end - batch_start))
 
       echo ""
-      echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-      echo "${BOLD}Batch $batch_num${track_label}: Spawning $batch_size parallel agents${RESET}"
-      echo "${DIM}Each agent runs in its own git worktree with isolated workspace${RESET}"
-      echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+      echo "${MAGENTA}╭─────────────────────────────────────────────────────────────────╮${RESET}"
+      echo "${MAGENTA}│${RESET} ${BOLD}⚡ Batch $batch_num${track_label}:${RESET} Spawning $batch_size parallel agents"
+      echo "${MAGENTA}│${RESET} ${DIM}🔄 Each agent runs in its own git worktree${RESET}"
+      echo "${MAGENTA}╰─────────────────────────────────────────────────────────────────╯${RESET}"
       echo ""
 
       # Setup arrays for this batch
@@ -2184,6 +2387,24 @@ run_parallel_tasks() {
       local status_files=()
       local output_files=()
       local log_files=()
+
+      # Show agent assignments with tree structure
+      local display_agent_num=1
+      for ((i = batch_start; i < batch_end; i++)); do
+        local task="${tasks[$i]}"
+        local task_short="${task:0:50}"
+
+        if [[ $display_agent_num -eq 1 ]]; then
+          echo "  ${CYAN}┌─ Agent $display_agent_num${RESET} │ $task_short"
+        elif [[ $display_agent_num -eq $batch_size ]]; then
+          echo "  ${CYAN}└─ Agent $display_agent_num${RESET} │ $task_short"
+        else
+          echo "  ${CYAN}├─ Agent $display_agent_num${RESET} │ $task_short"
+        fi
+        ((display_agent_num++))
+      done
+
+      echo ""
 
       # Start all agents in the batch
       for ((i = batch_start; i < batch_end; i++)); do
@@ -2201,9 +2422,6 @@ run_parallel_tasks() {
         log_files+=("$log_file")
 
         echo "waiting" > "$status_file"
-
-        # Show initial status
-        printf "  ${CYAN}◉${RESET} Agent %d: %s\n" "$agent_num" "${task:0:50}"
 
         # Run agent in background
         (
@@ -2279,20 +2497,25 @@ run_parallel_tasks() {
 
       # Show final status for this batch
       echo ""
-      echo "${BOLD}Batch $batch_num Results:${RESET}"
+      echo "  ${CYAN}📋 Batch $batch_num Results${RESET}"
+
       for ((j = 0; j < batch_size; j++)); do
         local task="${batch_tasks[$j]}"
+        local task_short="${task:0:40}"
         local status_file="${status_files[$j]}"
         local output_file="${output_files[$j]}"
         local log_file="${log_files[$j]}"
         local status=$(cat "$status_file" 2>/dev/null || echo "unknown")
         local agent_num=$((iteration - batch_size + j + 1))
 
-        local icon color branch_info=""
+        # Determine tree character
+        local tree_char="├─"
+        [[ $j -eq $((batch_size - 1)) ]] && tree_char="└─"
+
+        local icon color info=""
         case "$status" in
           done)
-            icon="✓"
-            color="$GREEN"
+            icon="${GREEN}✓${RESET}"
             # Collect tokens and branch name
             local output_data=$(cat "$output_file" 2>/dev/null || echo "0 0")
             local in_tok=$(echo "$output_data" | awk '{print $1}')
@@ -2302,10 +2525,17 @@ run_parallel_tasks() {
             [[ "$out_tok" =~ ^[0-9]+$ ]] || out_tok=0
             total_input_tokens=$((total_input_tokens + in_tok))
             total_output_tokens=$((total_output_tokens + out_tok))
+
+            # Format token info
+            if [[ $in_tok -gt 0 ]] || [[ $out_tok -gt 0 ]]; then
+              local in_fmt=$(format_token_count "$in_tok")
+              local out_fmt=$(format_token_count "$out_tok")
+              info="  ${DIM}[${in_fmt}→${out_fmt} tokens]${RESET}"
+            fi
+
             if [[ -n "$branch" ]]; then
               completed_branches+=("$branch")
               group_completed_branches+=("$branch")  # Also track per-group
-              branch_info=" → ${CYAN}$branch${RESET}"
             fi
 
             # Mark task complete in beads
@@ -2316,19 +2546,17 @@ run_parallel_tasks() {
             check_and_close_parent_epic "$task_id"
             ;;
           failed)
-            icon="✗"
-            color="$RED"
+            icon="${RED}✗${RESET}"
             if [[ -s "$log_file" ]]; then
-              branch_info=" ${DIM}(error below)${RESET}"
+              info="  ${DIM}(error below)${RESET}"
             fi
             ;;
           *)
-            icon="?"
-            color="$YELLOW"
+            icon="${YELLOW}?${RESET}"
             ;;
         esac
 
-        printf "  ${color}%s${RESET} Agent %d: %s%s\n" "$icon" "$agent_num" "${task:0:45}" "$branch_info"
+        echo "  $tree_char $icon ${CYAN}Agent $agent_num${RESET}  $task_short$info"
 
         # Show log for failed agents
         if [[ "$status" == "failed" ]] && [[ -s "$log_file" ]]; then
@@ -2464,17 +2692,29 @@ run_parallel_tasks() {
 
           # Cleanup all integration branches after successful merge (Greptile review)
           echo ""
-          echo "${DIM}Cleaning up integration branches...${RESET}"
+          echo "  ${DIM}🧹 Cleanup${RESET}"
+
+          # Count what we're deleting
+          local int_count=${#integration_branches[@]}
+          local agent_count=${#completed_branches[@]}
+
+          # Show summary
+          if [[ $int_count -gt 0 ]] && [[ $agent_count -gt 0 ]]; then
+            echo "  ${DIM}├─ Deleted $int_count integration branch(es)${RESET}"
+            echo "  ${DIM}└─ Deleted $agent_count agent branch(es)${RESET}"
+          elif [[ $int_count -gt 0 ]]; then
+            echo "  ${DIM}└─ Deleted $int_count integration branch(es)${RESET}"
+          elif [[ $agent_count -gt 0 ]]; then
+            echo "  ${DIM}└─ Deleted $agent_count agent branch(es)${RESET}"
+          fi
+
+          # Actually delete branches (silently)
           for int_branch in "${integration_branches[@]}"; do
-            git branch -D "$int_branch" >/dev/null 2>&1 && \
-              echo "  ${DIM}Deleted ${int_branch}${RESET}" || true
+            git branch -D "$int_branch" >/dev/null 2>&1 || true
           done
 
-          # Also cleanup the individual agent branches that were merged into integration
-          echo "${DIM}Cleaning up agent branches...${RESET}"
           for branch in "${completed_branches[@]}"; do
-            git branch -D "$branch" >/dev/null 2>&1 && \
-              echo "  ${DIM}Deleted ${branch}${RESET}" || true
+            git branch -D "$branch" >/dev/null 2>&1 || true
           done
         else
           printf " ${YELLOW}conflict${RESET}\n"
@@ -2565,44 +2805,60 @@ After resolving all conflicts:
 Be careful to preserve functionality from BOTH branches. The goal is to integrate all features."
 
           # Run AI to resolve conflicts
-          local resolve_tmpfile
-          resolve_tmpfile=$(mktemp)
-          
+          # Temporarily disable errexit since AI may fail
+          set +e
+          local ai_exit_code=0
+
           case "$AI_ENGINE" in
             opencode)
               OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
                 --format json \
-                "$resolve_prompt" > "$resolve_tmpfile" 2>&1
+                "$resolve_prompt" 2>&1
+              ai_exit_code=$?
               ;;
             cursor)
               agent --print --force \
                 --output-format stream-json \
-                "$resolve_prompt" > "$resolve_tmpfile" 2>&1
+                "$resolve_prompt" 2>&1
+              ai_exit_code=$?
               ;;
             qwen)
               qwen --output-format stream-json \
                 --approval-mode yolo \
-                -p "$resolve_prompt" > "$resolve_tmpfile" 2>&1
+                -p "$resolve_prompt" 2>&1
+              ai_exit_code=$?
               ;;
             droid)
               droid exec --output-format stream-json \
                 --auto medium \
-                "$resolve_prompt" > "$resolve_tmpfile" 2>&1
+                "$resolve_prompt" 2>&1
+              ai_exit_code=$?
               ;;
             codex)
               codex exec --full-auto \
                 --json \
-                "$resolve_prompt" > "$resolve_tmpfile" 2>&1
+                "$resolve_prompt" 2>&1
+              ai_exit_code=$?
               ;;
             *)
               claude --dangerously-skip-permissions \
                 -p "$resolve_prompt" \
-                --output-format stream-json > "$resolve_tmpfile" 2>&1
+                --output-format stream-json 2>&1
+              ai_exit_code=$?
               ;;
           esac
-          
-          rm -f "$resolve_tmpfile"
-          
+
+          # Re-enable errexit
+          set -e
+
+          # Check if AI command failed
+          if [[ $ai_exit_code -ne 0 ]]; then
+            printf " ${RED}✗ (AI error: exit code $ai_exit_code)${RESET}\n"
+            still_failed+=("$branch")
+            git merge --abort 2>/dev/null || true
+            continue
+          fi
+
           # Check if merge was completed
           if ! git diff --name-only --diff-filter=U 2>/dev/null | grep -q .; then
             # No more conflicts - merge succeeded
@@ -2644,58 +2900,72 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
 
 show_summary() {
   echo ""
-  echo "${BOLD}============================================${RESET}"
-  echo "${GREEN}All tasks complete!${RESET} Finished $iteration task(s)."
-  echo "${BOLD}============================================${RESET}"
+  echo "${BOLD}╔══════════════════════════════════════════════════════════════════${RESET}"
+  echo "${BOLD}║${RESET} ${GREEN}✓ All tasks complete!${RESET} Finished $iteration task(s)."
+  echo "${BOLD}╚══════════════════════════════════════════════════════════════════${RESET}"
   echo ""
-  echo "${BOLD}>>> Cost Summary${RESET}"
-  
-  # Cursor and Droid don't provide token usage, but do provide duration
+
+  # Cost summary with tree structure
+  echo "  ${CYAN}📊 Cost Summary${RESET}"
+
   if [[ "$AI_ENGINE" == "cursor" ]] || [[ "$AI_ENGINE" == "droid" ]]; then
-    echo "${DIM}Token usage not available (CLI doesn't expose this data)${RESET}"
+    echo "  ${DIM}├─ Token usage not available${RESET}"
     if [[ "$total_duration_ms" -gt 0 ]]; then
       local dur_sec=$((total_duration_ms / 1000))
       local dur_min=$((dur_sec / 60))
       local dur_sec_rem=$((dur_sec % 60))
       if [[ "$dur_min" -gt 0 ]]; then
-        echo "Total API time: ${dur_min}m ${dur_sec_rem}s"
+        echo "  ${DIM}└─ Total API time: ${dur_min}m ${dur_sec_rem}s${RESET}"
       else
-        echo "Total API time: ${dur_sec}s"
+        echo "  ${DIM}└─ Total API time: ${dur_sec}s${RESET}"
       fi
     fi
   else
-    echo "Input tokens:  $total_input_tokens"
-    echo "Output tokens: $total_output_tokens"
-    echo "Total tokens:  $((total_input_tokens + total_output_tokens))"
-    
-    # Show actual cost if available (OpenCode provides this), otherwise estimate
+    # Format numbers with thousand separators
+    local input_fmt=$(printf "%'d" "$total_input_tokens" 2>/dev/null || echo "$total_input_tokens")
+    local output_fmt=$(printf "%'d" "$total_output_tokens" 2>/dev/null || echo "$total_output_tokens")
+    local total_fmt=$(printf "%'d" "$((total_input_tokens + total_output_tokens))" 2>/dev/null || echo "$((total_input_tokens + total_output_tokens))")
+
+    echo "  ${DIM}├─ Input tokens:   $input_fmt${RESET}"
+    echo "  ${DIM}├─ Output tokens:  $output_fmt${RESET}"
+    echo "  ${DIM}├─ Total tokens:   $total_fmt${RESET}"
+
+    # Calculate cost
     if [[ "$AI_ENGINE" == "opencode" ]] && command -v bc &>/dev/null; then
       local has_actual_cost
       has_actual_cost=$(echo "$total_actual_cost > 0" | bc 2>/dev/null || echo "0")
       if [[ "$has_actual_cost" == "1" ]]; then
-        echo "Actual cost:   \$${total_actual_cost}"
+        echo "  ${DIM}└─ Actual cost:    \$${total_actual_cost}${RESET}"
       else
         local cost
         cost=$(calculate_cost "$total_input_tokens" "$total_output_tokens")
-        echo "Est. cost:     \$$cost"
+        echo "  ${DIM}└─ Est. cost:      \$$cost${RESET}"
       fi
     else
       local cost
       cost=$(calculate_cost "$total_input_tokens" "$total_output_tokens")
-      echo "Est. cost:     \$$cost"
+      echo "  ${DIM}└─ Est. cost:      \$$cost${RESET}"
     fi
   fi
-  
-  # Show branches if created
+
+  # Branches with tree structure
   if [[ -n "${task_branches[*]+"${task_branches[*]}"}" ]]; then
     echo ""
-    echo "${BOLD}>>> Branches Created${RESET}"
+    echo "  ${CYAN}🌿 Branches Created${RESET}"
+    local branch_count=${#task_branches[@]}
+    local i=1
     for branch in "${task_branches[@]}"; do
-      echo "  - $branch"
+      if [[ $i -eq $branch_count ]]; then
+        echo "  ${DIM}└─ $branch${RESET}"
+      else
+        echo "  ${DIM}├─ $branch${RESET}"
+      fi
+      ((i++))
     done
   fi
-  
-  echo "${BOLD}============================================${RESET}"
+
+  echo ""
+  echo "${BOLD}╚══════════════════════════════════════════════════════════════════${RESET}"
 }
 
 # ============================================
@@ -2747,24 +3017,40 @@ main() {
     validate_config
 
     # Show brownfield banner
-    echo "${BOLD}============================================${RESET}"
-    echo "${BOLD}Ralphy${RESET} - Single Task Mode"
+    echo ""
+    echo "${BOLD}╔══════════════════════════════════════════════════════════════════${RESET}"
+    echo "${BOLD}║${RESET} ${BOLD}${CYAN}🤖 Ralphy${RESET} - Single Task Mode"
+    echo "${BOLD}╠══════════════════════════════════════════════════════════════════${RESET}"
+
+    # Engine
     local engine_display
     case "$AI_ENGINE" in
-      opencode) engine_display="${CYAN}OpenCode${RESET}" ;;
-      cursor) engine_display="${YELLOW}Cursor Agent${RESET}" ;;
-      codex) engine_display="${BLUE}Codex${RESET}" ;;
-      qwen) engine_display="${GREEN}Qwen-Code${RESET}" ;;
-      droid) engine_display="${MAGENTA}Factory Droid${RESET}" ;;
-      *) engine_display="${MAGENTA}Claude Code${RESET}" ;;
+      opencode) engine_display="OpenCode" ;;
+      cursor) engine_display="Cursor Agent" ;;
+      codex) engine_display="Codex" ;;
+      qwen) engine_display="Qwen-Code" ;;
+      droid) engine_display="Factory Droid" ;;
+      *) engine_display="Claude Code" ;;
     esac
-    echo "Engine: $engine_display"
+    echo "${BOLD}║${RESET} ${DIM}⚙️  Engine:${RESET} $engine_display"
+
+    # Config
     if [[ -d "$RALPHY_DIR" ]]; then
-      echo "Config: ${GREEN}$RALPHY_DIR/${RESET}"
+      local rules_count=0
+      if [[ -f "$CONFIG_FILE" ]] && command -v yq &>/dev/null; then
+        rules_count=$(yq -r '.rules // [] | length' "$CONFIG_FILE" 2>/dev/null)
+      fi
+      if [[ $rules_count -gt 0 ]]; then
+        echo "${BOLD}║${RESET} ${DIM}📦 Config:${RESET} $RALPHY_DIR/ ($rules_count rules loaded)"
+      else
+        echo "${BOLD}║${RESET} ${DIM}📦 Config:${RESET} $RALPHY_DIR/"
+      fi
     else
-      echo "Config: ${DIM}none (run --init to configure)${RESET}"
+      echo "${BOLD}║${RESET} ${DIM}📦 Config:${RESET} none (run --init to configure)"
     fi
-    echo "${BOLD}============================================${RESET}"
+
+    echo "${BOLD}╚══════════════════════════════════════════════════════════════════${RESET}"
+    echo ""
 
     run_brownfield_task "$SINGLE_TASK"
     exit $?
@@ -2783,34 +3069,54 @@ main() {
   validate_config
 
   # Show banner
-  echo "${BOLD}============================================${RESET}"
-  echo "${BOLD}Beads-Ralphy${RESET} - Running until all tasks are complete"
+  echo ""
+  echo "${BOLD}╔══════════════════════════════════════════════════════════════════${RESET}"
+  echo "${BOLD}║${RESET} ${BOLD}${CYAN}🤖 Beads-Ralphy${RESET}"
+  echo "${BOLD}║${RESET} Running until all tasks are complete"
+  echo "${BOLD}╠══════════════════════════════════════════════════════════════════${RESET}"
+
+  # Engine
   local engine_display
   case "$AI_ENGINE" in
-    opencode) engine_display="${CYAN}OpenCode${RESET}" ;;
-    cursor) engine_display="${YELLOW}Cursor Agent${RESET}" ;;
-    codex) engine_display="${BLUE}Codex${RESET}" ;;
-    qwen) engine_display="${GREEN}Qwen-Code${RESET}" ;;
-    droid) engine_display="${MAGENTA}Factory Droid${RESET}" ;;
-    *) engine_display="${MAGENTA}Claude Code${RESET}" ;;
+    opencode) engine_display="OpenCode" ;;
+    cursor) engine_display="Cursor Agent" ;;
+    codex) engine_display="Codex" ;;
+    qwen) engine_display="Qwen-Code" ;;
+    droid) engine_display="Factory Droid" ;;
+    *) engine_display="Claude Code" ;;
   esac
-  echo "Engine: $engine_display"
-  echo "Source: ${CYAN}beads${RESET} (label: ${BEADS_LABEL:-ralph})"
+  echo "${BOLD}║${RESET} ${DIM}⚙️  Engine:${RESET} $engine_display"
+
+  # Source
+  echo "${BOLD}║${RESET} ${DIM}📋 Source:${RESET} beads (label: ${BEADS_LABEL:-ralph})"
+
+  # Config
   if [[ -d "$RALPHY_DIR" ]]; then
-    echo "Config: ${GREEN}$RALPHY_DIR/${RESET} (rules loaded)"
+    local rules_count=0
+    if [[ -f "$CONFIG_FILE" ]] && command -v yq &>/dev/null; then
+      rules_count=$(yq -r '.rules // [] | length' "$CONFIG_FILE" 2>/dev/null)
+    fi
+    if [[ $rules_count -gt 0 ]]; then
+      echo "${BOLD}║${RESET} ${DIM}📦 Config:${RESET} $RALPHY_DIR/ ($rules_count rules loaded)"
+    else
+      echo "${BOLD}║${RESET} ${DIM}📦 Config:${RESET} $RALPHY_DIR/"
+    fi
   fi
 
+  # Mode (if any special modes enabled)
   local mode_parts=()
   [[ "$DRY_RUN" == true ]] && mode_parts+=("dry-run")
   [[ "$PARALLEL" == true ]] && mode_parts+=("parallel:$MAX_PARALLEL")
   [[ "$BRANCH_PER_TASK" == true ]] && mode_parts+=("branch-per-task")
   [[ "$CREATE_PR" == true ]] && mode_parts+=("create-pr")
   [[ $MAX_ITERATIONS -gt 0 ]] && mode_parts+=("max:$MAX_ITERATIONS")
-  
+
   if [[ ${#mode_parts[@]} -gt 0 ]]; then
-    echo "Mode: ${YELLOW}${mode_parts[*]}${RESET}"
+    echo "${BOLD}║${RESET} ${DIM}🔧 Mode:${RESET} ${mode_parts[*]}"
   fi
-  echo "${BOLD}============================================${RESET}"
+
+  echo "${BOLD}╚══════════════════════════════════════════════════════════════════${RESET}"
+  echo ""
 
   # Run in parallel or sequential mode
   if [[ "$PARALLEL" == true ]]; then
