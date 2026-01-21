@@ -649,14 +649,19 @@ $acceptance
 1. Review recently completed tasks above for patterns and gotchas
 2. Implement the task following the design approach
 3. Verify all acceptance criteria are met
-4. Run tests if appropriate"
+4. Run tests and verify they pass
+   - Determine the appropriate test command for this project
+   - All tests must pass before marking complete
+5. Run build and verify it succeeds
+   - Determine the appropriate build command for this project
+   - Build must complete without errors before marking complete"
 
   # Add commit instruction only if auto-commit is enabled
-  local step_num=5
+  local step_num=6
   if [[ "$AUTO_COMMIT" == "true" ]]; then
     prompt+="
-5. Commit your changes with a descriptive message"
-    step_num=6
+$step_num. Commit your changes with a descriptive message"
+    step_num=7
   fi
 
   prompt+="
@@ -2122,8 +2127,9 @@ TASK: $task_name
 
 Instructions:
 1. Implement this specific task completely
-2. Write tests if appropriate
-3. Commit your changes with a descriptive message
+2. Write and run tests - all tests must pass
+3. Run build - build must succeed without errors
+4. Commit your changes with a descriptive message
 
 When THIS TASK is complete, output <promise>COMPLETE</promise>
 Focus only on implementing: $task_name"
