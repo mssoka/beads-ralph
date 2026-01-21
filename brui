@@ -1,0 +1,783 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# brui - Real-Time Beads Kanban Board
+# Version: 1.0.0
+
+VERSION="1.0.0"
+
+# Default configuration
+DEFAULT_LABEL="ralph"
+LABEL=""
+SHOW_ALL=false
+NO_WATCH=false
+FORCE_POLL=false
+POLL_INTERVAL=0.2
+DEBUG=false
+MIN_COLS=80
+MIN_LINES=24
+
+# Terminal dimensions
+COLS=$(tput cols 2>/dev/null || echo 80)
+LINES=$(tput lines 2>/dev/null || echo 24)
+
+# Colors
+COLOR_RESET=$'\033[0m'
+COLOR_BOLD=$'\033[1m'
+COLOR_DIM=$'\033[2m'
+
+# Priority colors
+COLOR_P0=$'\033[1;31m'  # Bold red (critical)
+COLOR_P1=$'\033[1;33m'  # Bold yellow (high)
+COLOR_P2=$'\033[1;34m'  # Bold blue (medium)
+COLOR_P3=$'\033[2;37m'  # Dim white (low)
+
+# Status colors
+COLOR_OPEN=$'\033[1;36m'       # Cyan
+COLOR_IN_PROGRESS=$'\033[1;33m' # Yellow
+COLOR_DONE=$'\033[1;32m'       # Green
+
+# Other colors
+COLOR_ID=$'\033[2;37m'         # Dim
+COLOR_LABEL=$'\033[0;35m'      # Magenta
+
+# Global state
+BEADS_DIR=""
+ISSUES_FILE=""
+LAST_MTIME=""
+WATCH_TOOL=""
+
+# Issue arrays
+declare -a OPEN_ISSUES=()
+declare -a INPROGRESS_ISSUES=()
+declare -a DONE_ISSUES=()
+
+# ==============================================================================
+# Utility Functions
+# ==============================================================================
+
+debug() {
+  if [[ "$DEBUG" == true ]]; then
+    echo "[DEBUG] $*" >&2
+  fi
+}
+
+error() {
+  echo -e "${COLOR_P0}Error:${COLOR_RESET} $*" >&2
+}
+
+die() {
+  error "$*"
+  exit 1
+}
+
+# ==============================================================================
+# Help and Version
+# ==============================================================================
+
+show_help() {
+  cat <<EOF
+brui - Real-Time Beads Kanban Board (v${VERSION})
+
+USAGE:
+  brui [options]
+
+OPTIONS:
+  --label LABEL       Filter by label (default: ralph)
+  --all               Show all issues (no label filter)
+  --no-watch          Disable real-time updates (static view)
+  --poll              Force polling mode (disable native file watching)
+  --refresh SECONDS   Polling interval in seconds (default: 0.2)
+  --debug             Enable debug logging
+  --help              Show this help message
+  --version           Show version
+
+KEYBOARD SHORTCUTS:
+  q           Quit
+  r           Manual refresh
+  1/2/3       Focus column (future feature)
+  ↑/↓         Scroll (future feature)
+
+EXAMPLES:
+  brui                    # Show ralph-labeled issues with real-time updates
+  brui --label critical   # Show critical issues only
+  brui --all              # Show all issues
+  brui --no-watch         # Static snapshot, no auto-refresh
+  brui --poll             # Use polling instead of native file watching
+
+EOF
+}
+
+show_version() {
+  echo "brui version ${VERSION}"
+}
+
+# ==============================================================================
+# Directory Discovery
+# ==============================================================================
+
+find_beads_directory() {
+  local dir="$PWD"
+
+  debug "Searching for .beads directory starting from: $dir"
+
+  while [[ "$dir" != "/" ]]; do
+    if [[ -d "$dir/.beads" ]]; then
+      BEADS_DIR="$dir/.beads"
+      ISSUES_FILE="$BEADS_DIR/issues.jsonl"
+      debug "Found .beads directory: $BEADS_DIR"
+
+      if [[ ! -f "$ISSUES_FILE" ]]; then
+        die "Found .beads directory but issues.jsonl is missing: $ISSUES_FILE"
+      fi
+
+      if [[ ! -r "$ISSUES_FILE" ]]; then
+        die "Cannot read issues.jsonl (permission denied): $ISSUES_FILE"
+      fi
+
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  die "Not in a beads project (no .beads directory found)"
+}
+
+# ==============================================================================
+# Watch Tool Detection
+# ==============================================================================
+
+detect_watch_tool() {
+  if [[ "$FORCE_POLL" == true ]]; then
+    echo "poll"
+    return
+  fi
+
+  if command -v fswatch &>/dev/null; then
+    debug "Detected fswatch (FSEvents on macOS)"
+    echo "fswatch"
+  elif command -v inotifywait &>/dev/null; then
+    debug "Detected inotifywait (inotify on Linux)"
+    echo "inotifywait"
+  else
+    debug "No native file watching tool found, falling back to polling"
+    echo "poll"
+  fi
+}
+
+# ==============================================================================
+# Issue Loading and Filtering
+# ==============================================================================
+
+load_issues() {
+  debug "Loading issues from: $ISSUES_FILE"
+
+  if [[ ! -f "$ISSUES_FILE" ]]; then
+    error "Issues file disappeared: $ISSUES_FILE"
+    return 1
+  fi
+
+  # Build jq filter
+  local label_filter
+  if [[ "$SHOW_ALL" == true ]]; then
+    label_filter="true"
+  else
+    label_filter="(.labels | contains([\"$LABEL\"]))"
+  fi
+
+  # Load open issues (bash 3.2 compatible)
+  OPEN_ISSUES=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && OPEN_ISSUES+=("$line")
+  done < <(
+    jq -r --arg status "open" \
+      "select(.status == \$status) | select($label_filter) | @json" \
+      "$ISSUES_FILE" 2>/dev/null || true
+  )
+
+  # Load in-progress issues
+  INPROGRESS_ISSUES=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && INPROGRESS_ISSUES+=("$line")
+  done < <(
+    jq -r --arg status "in_progress" \
+      "select(.status == \$status) | select($label_filter) | @json" \
+      "$ISSUES_FILE" 2>/dev/null || true
+  )
+
+  # Load done/closed issues
+  DONE_ISSUES=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && DONE_ISSUES+=("$line")
+  done < <(
+    jq -r --arg status "closed" \
+      "select(.status == \$status) | select($label_filter) | @json" \
+      "$ISSUES_FILE" 2>/dev/null || true
+  )
+
+  debug "Loaded: ${#OPEN_ISSUES[@]} open, ${#INPROGRESS_ISSUES[@]} in progress, ${#DONE_ISSUES[@]} done"
+}
+
+# ==============================================================================
+# Issue Card Formatting
+# ==============================================================================
+
+get_priority_color() {
+  local priority="$1"
+
+  case "$priority" in
+    0|P0) echo "$COLOR_P0" ;;
+    1|P1) echo "$COLOR_P1" ;;
+    2|P2) echo "$COLOR_P2" ;;
+    3|P3) echo "$COLOR_P3" ;;
+    *) echo "$COLOR_RESET" ;;
+  esac
+}
+
+truncate_string() {
+  local str="$1"
+  local max_len="$2"
+
+  if [[ ${#str} -gt $max_len ]]; then
+    echo "${str:0:$((max_len - 3))}..."
+  else
+    echo "$str"
+  fi
+}
+
+format_issue_card() {
+  local issue_json="$1"
+  local card_width="$2"
+
+  # Parse issue fields
+  local id title priority owner labels
+  id=$(echo "$issue_json" | jq -r '.id // "unknown"')
+  title=$(echo "$issue_json" | jq -r '.title // "Untitled"')
+  priority=$(echo "$issue_json" | jq -r '.priority // 3')
+  owner=$(echo "$issue_json" | jq -r '.owner // ""')
+
+  # Get first label (if multiple)
+  local first_label
+  first_label=$(echo "$issue_json" | jq -r '.labels[0] // ""')
+
+  # Get priority color
+  local prio_color
+  prio_color=$(get_priority_color "$priority")
+
+  # Truncate title to fit card
+  local title_max_len=$((card_width - 4))
+  local truncated_title
+  truncated_title=$(truncate_string "$title" "$title_max_len")
+
+  # Build card
+  echo -e " ${prio_color}┌$(printf '─%.0s' $(seq 1 $((card_width - 2))))┐${COLOR_RESET}"
+  echo -e " ${prio_color}│${COLOR_RESET} ${COLOR_ID}${id}${COLOR_RESET}$(printf ' %.0s' $(seq 1 $((card_width - ${#id} - 3))))${prio_color}│${COLOR_RESET}"
+  echo -e " ${prio_color}│${COLOR_RESET} ${truncated_title}$(printf ' %.0s' $(seq 1 $((card_width - ${#truncated_title} - 3))))${prio_color}│${COLOR_RESET}"
+
+  # Metadata line (priority + owner)
+  local meta="P${priority}"
+  [[ -n "$owner" ]] && meta="${meta} · ${owner}"
+  local meta_truncated
+  meta_truncated=$(truncate_string "$meta" $((card_width - 4)))
+  echo -e " ${prio_color}│${COLOR_RESET} ${COLOR_DIM}${meta_truncated}${COLOR_RESET}$(printf ' %.0s' $(seq 1 $((card_width - ${#meta_truncated} - 3))))${prio_color}│${COLOR_RESET}"
+
+  # Label line (if exists)
+  if [[ -n "$first_label" ]]; then
+    local label_text="🏷 ${first_label}"
+    local label_truncated
+    label_truncated=$(truncate_string "$label_text" $((card_width - 4)))
+    echo -e " ${prio_color}│${COLOR_RESET} ${COLOR_LABEL}${label_truncated}${COLOR_RESET}$(printf ' %.0s' $(seq 1 $((card_width - ${#label_truncated} - 3))))${prio_color}│${COLOR_RESET}"
+  else
+    echo -e " ${prio_color}│$(printf ' %.0s' $(seq 1 $((card_width - 2))))│${COLOR_RESET}"
+  fi
+
+  echo -e " ${prio_color}└$(printf '─%.0s' $(seq 1 $((card_width - 2))))┘${COLOR_RESET}"
+}
+
+# ==============================================================================
+# Kanban Board Rendering
+# ==============================================================================
+
+render_kanban() {
+  # Clear screen and move to top
+  tput clear
+  tput cup 0 0
+
+  # Check minimum terminal size
+  if [[ $COLS -lt $MIN_COLS || $LINES -lt $MIN_LINES ]]; then
+    echo -e "${COLOR_P0}Terminal too small!${COLOR_RESET}"
+    echo "Minimum size: ${MIN_COLS}x${MIN_LINES}"
+    echo "Current size: ${COLS}x${LINES}"
+    echo "Please resize your terminal."
+    return
+  fi
+
+  # Calculate column width (3 columns with borders)
+  local col_width=$(( (COLS - 6) / 3 ))
+  local card_width=$((col_width - 2))
+
+  # Header
+  local header_label
+  if [[ "$SHOW_ALL" == true ]]; then
+    header_label="all issues"
+  else
+    header_label="label: $LABEL"
+  fi
+
+  local watch_indicator=""
+  if [[ "$NO_WATCH" == false ]]; then
+    watch_indicator="[↻ Real-time: $WATCH_TOOL]"
+  fi
+
+  echo -e "${COLOR_BOLD}╔$(printf '═%.0s' $(seq 1 $((COLS - 2))))╗${COLOR_RESET}"
+  printf "${COLOR_BOLD}║${COLOR_RESET} brui - Beads Kanban Board  [%s]  %s" "$header_label" "$watch_indicator"
+  printf "%*s${COLOR_BOLD}║${COLOR_RESET}\n" $((COLS - 55 - ${#header_label} - ${#watch_indicator})) ""
+
+  # Column headers
+  echo -e "${COLOR_BOLD}╠$(printf '═%.0s' $(seq 1 $col_width))╦$(printf '═%.0s' $(seq 1 $col_width))╦$(printf '═%.0s' $(seq 1 $((COLS - col_width - col_width - 4))))╣${COLOR_RESET}"
+
+  local open_count=${#OPEN_ISSUES[@]}
+  local inprogress_count=${#INPROGRESS_ISSUES[@]}
+  local done_count=${#DONE_ISSUES[@]}
+
+  printf "${COLOR_BOLD}║${COLOR_RESET} ${COLOR_OPEN}%-${col_width}s${COLOR_RESET}${COLOR_BOLD}║${COLOR_RESET}" "  OPEN ($open_count)"
+  printf " ${COLOR_IN_PROGRESS}%-${col_width}s${COLOR_RESET}${COLOR_BOLD}║${COLOR_RESET}" "  IN PROGRESS ($inprogress_count)"
+  printf " ${COLOR_DONE}%-${col_width}s${COLOR_RESET}${COLOR_BOLD}║${COLOR_RESET}\n" "  DONE ($done_count)"
+
+  echo -e "${COLOR_BOLD}╠$(printf '═%.0s' $(seq 1 $col_width))╬$(printf '═%.0s' $(seq 1 $col_width))╬$(printf '═%.0s' $(seq 1 $((COLS - col_width - col_width - 4))))╣${COLOR_RESET}"
+
+  # Calculate max issues to show per column (leave room for footer)
+  local max_issues_per_col=$(( (LINES - 8) / 7 ))  # Each card is ~6-7 lines
+
+  # Render issue cards in columns
+  local max_issues=$open_count
+  [[ $inprogress_count -gt $max_issues ]] && max_issues=$inprogress_count
+  [[ $done_count -gt $max_issues ]] && max_issues=$done_count
+  [[ $max_issues -gt $max_issues_per_col ]] && max_issues=$max_issues_per_col
+
+  # If no issues at all
+  if [[ $open_count -eq 0 && $inprogress_count -eq 0 && $done_count -eq 0 ]]; then
+    local empty_msg="No issues found"
+    if [[ "$SHOW_ALL" == false ]]; then
+      empty_msg="No issues with label '$LABEL'"
+    fi
+    echo -e "${COLOR_BOLD}║${COLOR_RESET}$(printf ' %.0s' $(seq 1 $((COLS - 2))))${COLOR_BOLD}║${COLOR_RESET}"
+    printf "${COLOR_BOLD}║${COLOR_RESET}%*s%s%*s${COLOR_BOLD}║${COLOR_RESET}\n" $(((COLS - ${#empty_msg}) / 2)) "" "${COLOR_DIM}$empty_msg${COLOR_RESET}" $(((COLS - ${#empty_msg}) / 2)) ""
+    echo -e "${COLOR_BOLD}║${COLOR_RESET}$(printf ' %.0s' $(seq 1 $((COLS - 2))))${COLOR_BOLD}║${COLOR_RESET}"
+  else
+    # Render cards row by row
+    for ((i=0; i<max_issues; i++)); do
+      # Get card content for each column
+      local open_card=""
+      local inprogress_card=""
+      local done_card=""
+
+      if [[ $i -lt $open_count ]]; then
+        open_card=$(format_issue_card "${OPEN_ISSUES[$i]}" "$card_width")
+      fi
+
+      if [[ $i -lt $inprogress_count ]]; then
+        inprogress_card=$(format_issue_card "${INPROGRESS_ISSUES[$i]}" "$card_width")
+      fi
+
+      if [[ $i -lt $done_count ]]; then
+        done_card=$(format_issue_card "${DONE_ISSUES[$i]}" "$card_width")
+      fi
+
+      # Render cards side by side (this is simplified - real implementation would need proper line-by-line rendering)
+      if [[ -n "$open_card" || -n "$inprogress_card" || -n "$done_card" ]]; then
+        # Print each card with column separators
+        # Note: This is a simplified version. A full implementation would render line-by-line.
+        echo -e "${COLOR_BOLD}║${COLOR_RESET}"
+        echo "$open_card" | while IFS= read -r line; do
+          printf "${COLOR_BOLD}║${COLOR_RESET}%s" "$line"
+          printf "%*s${COLOR_BOLD}║${COLOR_RESET}\n" $((col_width - card_width)) ""
+        done
+        echo -e "${COLOR_BOLD}║${COLOR_RESET}"
+      fi
+    done
+
+    # Show truncation message if needed
+    if [[ $open_count -gt $max_issues_per_col || $inprogress_count -gt $max_issues_per_col || $done_count -gt $max_issues_per_col ]]; then
+      echo -e "${COLOR_BOLD}║${COLOR_RESET}$(printf ' %.0s' $(seq 1 $((COLS - 2))))${COLOR_BOLD}║${COLOR_RESET}"
+      local truncated_msg="(Showing first $max_issues_per_col issues per column - resize terminal for more)"
+      printf "${COLOR_BOLD}║${COLOR_RESET}%*s%s%*s${COLOR_BOLD}║${COLOR_RESET}\n" $(((COLS - ${#truncated_msg}) / 2)) "" "${COLOR_DIM}$truncated_msg${COLOR_RESET}" $(((COLS - ${#truncated_msg}) / 2)) ""
+    fi
+  fi
+
+  # Footer
+  echo -e "${COLOR_BOLD}╚$(printf '═%.0s' $(seq 1 $((COLS - 2))))╝${COLOR_RESET}"
+  echo -e "${COLOR_DIM}[q]uit  [r]efresh${COLOR_RESET}"
+}
+
+# Simplified rendering for MVP (show issues in vertical list per column)
+render_kanban_simple() {
+  # Clear screen
+  tput clear
+  tput cup 0 0
+
+  # Check minimum terminal size
+  if [[ $COLS -lt $MIN_COLS || $LINES -lt $MIN_LINES ]]; then
+    echo -e "${COLOR_P0}Terminal too small!${COLOR_RESET}"
+    echo "Minimum size: ${MIN_COLS}x${MIN_LINES}"
+    echo "Current size: ${COLS}x${LINES}"
+    echo "Please resize your terminal."
+    return
+  fi
+
+  # Header
+  local header_label
+  if [[ "$SHOW_ALL" == true ]]; then
+    header_label="all issues"
+  else
+    header_label="label: $LABEL"
+  fi
+
+  local watch_indicator=""
+  if [[ "$NO_WATCH" == false ]]; then
+    watch_indicator="[↻ Real-time: $WATCH_TOOL]"
+  fi
+
+  echo -e "${COLOR_BOLD}════════════════════════════════════════════════════════════════${COLOR_RESET}"
+  echo -e "${COLOR_BOLD}  brui - Beads Kanban Board  [$header_label]  $watch_indicator${COLOR_RESET}"
+  echo -e "${COLOR_BOLD}════════════════════════════════════════════════════════════════${COLOR_RESET}"
+  echo ""
+
+  # Calculate column width
+  local col_width=$(( (COLS - 4) / 3 ))
+
+  # Column headers
+  printf "\e[1;36m%-${col_width}s\e[0m \e[1;33m%-${col_width}s\e[0m \e[1;32m%-${col_width}s\e[0m\n" \
+    "OPEN (${#OPEN_ISSUES[@]})" \
+    "IN PROGRESS (${#INPROGRESS_ISSUES[@]})" \
+    "DONE (${#DONE_ISSUES[@]})"
+
+  printf "%-${col_width}s %-${col_width}s %-${col_width}s\n" \
+    "$(printf '─%.0s' $(seq 1 $((col_width - 1))))" \
+    "$(printf '─%.0s' $(seq 1 $((col_width - 1))))" \
+    "$(printf '─%.0s' $(seq 1 $((col_width - 1))))"
+
+  # If no issues
+  if [[ ${#OPEN_ISSUES[@]} -eq 0 && ${#INPROGRESS_ISSUES[@]} -eq 0 && ${#DONE_ISSUES[@]} -eq 0 ]]; then
+    echo ""
+    if [[ "$SHOW_ALL" == false ]]; then
+      echo -e "${COLOR_DIM}No issues found with label '$LABEL'${COLOR_RESET}"
+    else
+      echo -e "${COLOR_DIM}No issues found${COLOR_RESET}"
+    fi
+    echo ""
+  else
+    # Show up to 10 issues per column
+    local max_display=10
+
+    for ((i=0; i<max_display; i++)); do
+      local open_line=""
+      local inprogress_line=""
+      local done_line=""
+
+      # Open column
+      if [[ $i -lt ${#OPEN_ISSUES[@]} ]]; then
+        local issue="${OPEN_ISSUES[$i]}"
+        local id=$(echo "$issue" | jq -r '.id')
+        local title=$(echo "$issue" | jq -r '.title')
+        local priority=$(echo "$issue" | jq -r '.priority // 3')
+        local prio_color=$(get_priority_color "$priority")
+        local truncated_title=$(truncate_string "$title" $((col_width - ${#id} - 3)))
+        open_line="${prio_color}${id}${COLOR_RESET} ${truncated_title}"
+      fi
+
+      # In Progress column
+      if [[ $i -lt ${#INPROGRESS_ISSUES[@]} ]]; then
+        local issue="${INPROGRESS_ISSUES[$i]}"
+        local id=$(echo "$issue" | jq -r '.id')
+        local title=$(echo "$issue" | jq -r '.title')
+        local priority=$(echo "$issue" | jq -r '.priority // 3')
+        local prio_color=$(get_priority_color "$priority")
+        local truncated_title=$(truncate_string "$title" $((col_width - ${#id} - 3)))
+        inprogress_line="${prio_color}${id}${COLOR_RESET} ${truncated_title}"
+      fi
+
+      # Done column
+      if [[ $i -lt ${#DONE_ISSUES[@]} ]]; then
+        local issue="${DONE_ISSUES[$i]}"
+        local id=$(echo "$issue" | jq -r '.id')
+        local title=$(echo "$issue" | jq -r '.title')
+        local priority=$(echo "$issue" | jq -r '.priority // 3')
+        local prio_color=$(get_priority_color "$priority")
+        local truncated_title=$(truncate_string "$title" $((col_width - ${#id} - 3)))
+        done_line="${prio_color}${id}${COLOR_RESET} ${truncated_title}"
+      fi
+
+      # Print row (need to handle ANSI color codes in width calculation)
+      printf "%-${col_width}b %-${col_width}b %-${col_width}b\n" "$open_line" "$inprogress_line" "$done_line"
+    done
+
+    # Show "..." if more issues exist
+    local more_open=$((${#OPEN_ISSUES[@]} - max_display))
+    local more_inprogress=$((${#INPROGRESS_ISSUES[@]} - max_display))
+    local more_done=$((${#DONE_ISSUES[@]} - max_display))
+
+    if [[ $more_open -gt 0 || $more_inprogress -gt 0 || $more_done -gt 0 ]]; then
+      echo ""
+      local more_line=""
+      [[ $more_open -gt 0 ]] && more_line+=$(printf "%-${col_width}s" "${COLOR_DIM}(+$more_open more)${COLOR_RESET}")
+      [[ $more_inprogress -gt 0 ]] && more_line+=$(printf " %-${col_width}s" "${COLOR_DIM}(+$more_inprogress more)${COLOR_RESET}")
+      [[ $more_done -gt 0 ]] && more_line+=$(printf " %-${col_width}s" "${COLOR_DIM}(+$more_done more)${COLOR_RESET}")
+      echo -e "$more_line"
+    fi
+  fi
+
+  # Footer
+  echo ""
+  echo -e "${COLOR_BOLD}════════════════════════════════════════════════════════════════${COLOR_RESET}"
+  echo -e "${COLOR_DIM}[q]uit  [r]efresh${COLOR_RESET}"
+}
+
+# ==============================================================================
+# File Watching and Auto-Refresh
+# ==============================================================================
+
+# Debounce refresh to avoid rapid updates
+LAST_REFRESH_TIME=0
+DEBOUNCE_MS=100
+
+should_refresh() {
+  local current_time=$(date +%s%3N)  # milliseconds
+  local elapsed=$((current_time - LAST_REFRESH_TIME))
+
+  if [[ $elapsed -ge $DEBOUNCE_MS ]]; then
+    LAST_REFRESH_TIME=$current_time
+    return 0
+  else
+    return 1
+  fi
+}
+
+refresh_display() {
+  if should_refresh; then
+    debug "Refreshing display..."
+    load_issues
+    render_kanban_simple
+  fi
+}
+
+watch_and_refresh() {
+  case "$WATCH_TOOL" in
+    fswatch)
+      debug "Starting fswatch on $ISSUES_FILE"
+      fswatch -0 -e ".*" -i "\\.jsonl$" "$BEADS_DIR" 2>/dev/null | while read -d "" event; do
+        debug "File change detected: $event"
+        refresh_display
+      done
+      ;;
+
+    inotifywait)
+      debug "Starting inotifywait on $ISSUES_FILE"
+      inotifywait -m -e modify,close_write "$ISSUES_FILE" 2>/dev/null | while read path action file; do
+        debug "File change detected: $action on $file"
+        refresh_display
+      done
+      ;;
+
+    poll)
+      debug "Starting polling mode (interval: ${POLL_INTERVAL}s)"
+      LAST_MTIME=$(stat -f %m "$ISSUES_FILE" 2>/dev/null || stat -c %Y "$ISSUES_FILE" 2>/dev/null)
+
+      while true; do
+        sleep "$POLL_INTERVAL"
+
+        local current_mtime
+        current_mtime=$(stat -f %m "$ISSUES_FILE" 2>/dev/null || stat -c %Y "$ISSUES_FILE" 2>/dev/null)
+
+        if [[ "$current_mtime" != "$LAST_MTIME" ]]; then
+          debug "File modification detected (mtime changed)"
+          LAST_MTIME=$current_mtime
+          refresh_display
+        fi
+      done
+      ;;
+
+    *)
+      die "Unknown watch tool: $WATCH_TOOL"
+      ;;
+  esac
+}
+
+# ==============================================================================
+# Keyboard Input Handler
+# ==============================================================================
+
+handle_input() {
+  # Read single character without echo
+  local char
+  read -rsn1 char
+
+  case "$char" in
+    q|Q)
+      debug "Quit requested"
+      return 1
+      ;;
+    r|R)
+      debug "Manual refresh requested"
+      refresh_display
+      ;;
+    *)
+      debug "Unknown key: $char"
+      ;;
+  esac
+
+  return 0
+}
+
+# ==============================================================================
+# Main Loop
+# ==============================================================================
+
+run_interactive() {
+  # Save terminal state
+  tput smcup
+
+  # Set up cleanup
+  trap 'tput rmcup; exit' INT TERM EXIT
+
+  # Handle window resize
+  trap 'COLS=$(tput cols); LINES=$(tput lines); refresh_display' WINCH
+
+  # Initial render
+  load_issues
+  render_kanban_simple
+
+  if [[ "$NO_WATCH" == false ]]; then
+    # Start file watcher in background
+    watch_and_refresh &
+    local watcher_pid=$!
+
+    # Handle keyboard input in foreground
+    while handle_input; do
+      :
+    done
+
+    # Cleanup watcher
+    kill $watcher_pid 2>/dev/null || true
+  else
+    # Static mode - just wait for keyboard input
+    while handle_input; do
+      :
+    done
+  fi
+
+  # Restore terminal
+  tput rmcup
+}
+
+run_static() {
+  # One-time render without watch mode
+  load_issues
+  render_kanban_simple
+}
+
+# ==============================================================================
+# Argument Parsing
+# ==============================================================================
+
+parse_args() {
+  LABEL="$DEFAULT_LABEL"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --label)
+        shift
+        [[ $# -eq 0 ]] && die "--label requires an argument"
+        LABEL="$1"
+        SHOW_ALL=false
+        shift
+        ;;
+      --all)
+        SHOW_ALL=true
+        shift
+        ;;
+      --no-watch)
+        NO_WATCH=true
+        shift
+        ;;
+      --poll)
+        FORCE_POLL=true
+        shift
+        ;;
+      --refresh)
+        shift
+        [[ $# -eq 0 ]] && die "--refresh requires an argument"
+        POLL_INTERVAL="$1"
+        shift
+        ;;
+      --debug)
+        DEBUG=true
+        shift
+        ;;
+      --help|-h)
+        show_help
+        exit 0
+        ;;
+      --version|-v)
+        show_version
+        exit 0
+        ;;
+      *)
+        die "Unknown option: $1\nUse --help for usage information."
+        ;;
+    esac
+  done
+}
+
+# ==============================================================================
+# Main Entry Point
+# ==============================================================================
+
+main() {
+  # Parse arguments
+  parse_args "$@"
+
+  # Check dependencies
+  if ! command -v jq &>/dev/null; then
+    die "jq is required but not installed. Install with: brew install jq"
+  fi
+
+  if ! command -v tput &>/dev/null; then
+    die "tput is required but not found"
+  fi
+
+  # Find beads directory
+  find_beads_directory
+
+  # Detect watch tool (if needed)
+  if [[ "$NO_WATCH" == false ]]; then
+    WATCH_TOOL=$(detect_watch_tool)
+    debug "Using watch tool: $WATCH_TOOL"
+
+    if [[ "$WATCH_TOOL" == "fswatch" ]] && ! command -v fswatch &>/dev/null; then
+      echo -e "${COLOR_P1}Warning:${COLOR_RESET} fswatch not found. Install with: brew install fswatch"
+      echo "Falling back to polling mode..."
+      FORCE_POLL=true
+      WATCH_TOOL="poll"
+    fi
+
+    if [[ "$WATCH_TOOL" == "inotifywait" ]] && ! command -v inotifywait &>/dev/null; then
+      echo -e "${COLOR_P1}Warning:${COLOR_RESET} inotifywait not found. Install with: apt-get install inotify-tools"
+      echo "Falling back to polling mode..."
+      FORCE_POLL=true
+      WATCH_TOOL="poll"
+    fi
+  fi
+
+  # Run appropriate mode
+  if [[ "$NO_WATCH" == true ]]; then
+    run_static
+  else
+    run_interactive
+  fi
+}
+
+# Run main if not sourced
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

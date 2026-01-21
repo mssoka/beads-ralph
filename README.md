@@ -8,12 +8,62 @@ Autonomous AI coding loop for beads-tracked projects. Uses BV (beads viewer) for
 
 ```bash
 git clone https://github.com/mss7082/beads-ralphy.git
-cd beads-ralphy && chmod +x beads-ralphy.sh
+cd beads-ralphy && chmod +x br
 
 # Run in any beads project
 cd /path/to/your/beads/project
-/path/to/beads-ralphy.sh
+/path/to/br
 ```
+
+## brui - Real-Time Kanban Board
+
+**brui** is a real-time terminal-based kanban board that visualizes your beads issues:
+
+```bash
+# View kanban board (default: ralph label)
+./brui
+
+# Show all issues
+./brui --all
+
+# Filter by different label
+./brui --label critical
+
+# Static snapshot (no auto-refresh)
+./brui --no-watch
+```
+
+**Features:**
+- 📊 Three columns: Open, In Progress, Done
+- ⚡ Real-time updates using FSEvents (macOS) or inotify (Linux)
+- 🎨 Color-coded by priority (P0=red, P1=yellow, P2=blue, P3=dim)
+- 🏷️ Label filtering (default: ralph)
+- ⌨️ Keyboard shortcuts: `q` to quit, `r` to refresh
+
+**Watch it work:**
+```bash
+# Terminal 1: Run brui to watch board
+./brui
+
+# Terminal 2: Run br
+./br --max-iterations 1
+
+# See issues move from Open → In Progress → Done in real-time!
+```
+
+**Installation:**
+```bash
+# Make executable (already done if you cloned the repo)
+chmod +x brui
+
+# Optional: Create symlink for global access
+ln -s $(pwd)/brui /usr/local/bin/brui
+```
+
+**Requirements:**
+- `jq` (JSON parsing)
+- `fswatch` (optional, for real-time updates on macOS): `brew install fswatch`
+- Falls back to polling if native file watching unavailable
 
 ## Prerequisites
 
@@ -41,17 +91,17 @@ Beads-Ralphy uses BV's graph-aware triage to:
 Works on tasks from your beads tracker:
 
 ```bash
-./beads-ralphy.sh                    # Process tasks with 'ralph' label
-./beads-ralphy.sh --label critical   # Process tasks with 'critical' label
-./beads-ralphy.sh --parallel         # Run 3 tasks in parallel (respects dependencies)
+./br                    # Process tasks with 'ralph' label
+./br --label critical   # Process tasks with 'critical' label
+./br --parallel         # Run 3 tasks in parallel (respects dependencies)
 ```
 
 ### Single Task Mode
 Run a one-off task without beads:
 
 ```bash
-./beads-ralphy.sh "add dark mode toggle"
-./beads-ralphy.sh "fix the login bug" --cursor
+./br "add dark mode toggle"
+./br "fix the login bug" --cursor
 ```
 
 ## Project Config
@@ -59,9 +109,9 @@ Run a one-off task without beads:
 Optional `.ralphy/config.yaml` for project-specific rules:
 
 ```bash
-./beads-ralphy.sh --init              # auto-detects project settings
-./beads-ralphy.sh --config            # view config
-./beads-ralphy.sh --add-rule "use TypeScript strict mode"
+./br --init              # auto-detects project settings
+./br --config            # view config
+./br --add-rule "use TypeScript strict mode"
 ```
 
 Example config:
@@ -89,12 +139,12 @@ boundaries:
 ## AI Engines
 
 ```bash
-./beads-ralphy.sh              # Claude Code (default)
-./beads-ralphy.sh --opencode   # OpenCode
-./beads-ralphy.sh --cursor     # Cursor
-./beads-ralphy.sh --codex      # Codex
-./beads-ralphy.sh --qwen       # Qwen-Code
-./beads-ralphy.sh --droid      # Factory Droid
+./br              # Claude Code (default)
+./br --opencode   # OpenCode
+./br --cursor     # Cursor
+./br --codex      # Codex
+./br --qwen       # Qwen-Code
+./br --droid      # Factory Droid
 ```
 
 ## Parallel Execution
@@ -102,8 +152,8 @@ boundaries:
 BV automatically computes execution tracks based on task dependencies:
 
 ```bash
-./beads-ralphy.sh --parallel                  # 3 agents default
-./beads-ralphy.sh --parallel --max-parallel 5 # 5 agents max
+./br --parallel                  # 3 agents default
+./br --parallel --max-parallel 5 # 5 agents max
 ```
 
 **How it works:**
@@ -157,10 +207,10 @@ Uses BV's graph-aware ranking:
 ## Branch Workflow
 
 ```bash
-./beads-ralphy.sh --branch-per-task                # branch per task
-./beads-ralphy.sh --branch-per-task --create-pr    # + create PRs
-./beads-ralphy.sh --branch-per-task --draft-pr     # + draft PRs
-./beads-ralphy.sh --base-branch develop            # branch from develop
+./br --branch-per-task                # branch per task
+./br --branch-per-task --create-pr    # + create PRs
+./br --branch-per-task --draft-pr     # + draft PRs
+./br --base-branch develop            # branch from develop
 ```
 
 Branch naming: `ralphy/<task-id-title-slug>`
@@ -193,35 +243,35 @@ Branch naming: `ralphy/<task-id-title-slug>`
 
 ```bash
 # Basic usage - process top task with 'ralph' label
-./beads-ralphy.sh
+./br
 
 # Custom label filter
-./beads-ralphy.sh --label critical
+./br --label critical
 
 # Parallel execution (3 agents, dependency-aware)
-./beads-ralphy.sh --parallel
+./br --parallel
 
 # Parallel with more agents
-./beads-ralphy.sh --parallel --max-parallel 5
+./br --parallel --max-parallel 5
 
 # Different AI engine
-./beads-ralphy.sh --opencode --parallel
+./br --opencode --parallel
 
 # Branch workflow with PRs
-./beads-ralphy.sh --parallel --branch-per-task --create-pr
+./br --parallel --branch-per-task --create-pr
 
 # Preview without execution
-./beads-ralphy.sh --dry-run
+./br --dry-run
 
 # Single brownfield task
-./beads-ralphy.sh "refactor auth module to use new JWT library"
+./br "refactor auth module to use new JWT library"
 ```
 
 ## Workflow
 
 1. **Setup**: Initialize beads project with `bd init`
 2. **Create tasks**: Use `bd create` with full context (description, design, acceptance)
-3. **Run beads-ralphy**: Automatically picks top-ranked task, executes, closes, repeats
+3. **Run br**: Automatically picks top-ranked task, executes, closes, repeats
 4. **Parallel mode**: Runs multiple independent tasks simultaneously
 5. **Sync**: Auto-syncs task status after each track
 

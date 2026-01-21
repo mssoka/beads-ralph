@@ -321,9 +321,9 @@ EOF
   echo "  ${CYAN}$CONFIG_FILE${RESET}   - Your rules and preferences"
   echo ""
   echo "${BOLD}Next steps:${RESET}"
-  echo "  1. Add rules:  ${CYAN}beads-ralphy --add-rule \"your rule here\"${RESET}"
+  echo "  1. Add rules:  ${CYAN}br --add-rule \"your rule here\"${RESET}"
   echo "  2. Or edit:    ${CYAN}$CONFIG_FILE${RESET}"
-  echo "  3. Run:        ${CYAN}beads-ralphy \"your task\"${RESET} or ${CYAN}beads-ralphy${RESET} (in beads project)"
+  echo "  3. Run:        ${CYAN}br \"your task\"${RESET} or ${CYAN}br${RESET} (in beads project)"
 }
 
 # Validate .ralphy/config.yaml syntax and structure
@@ -352,7 +352,7 @@ validate_config() {
     local project_name
     project_name=$(yq -r '.project.name // ""' "$CONFIG_FILE" 2>/dev/null)
     if [[ -z "$project_name" ]]; then
-      log_warn "Config missing 'project.name'. Run: beads-ralphy --init"
+      log_warn "Config missing 'project.name'. Run: br --init"
     fi
 
     # Validate known top-level keys
@@ -744,9 +744,9 @@ show_help() {
 ${BOLD}Ralphy${RESET} - Autonomous AI Coding Loop (v${VERSION})
 
 ${BOLD}USAGE:${RESET}
-  ./beads-ralphy.sh [options]        # Beads mode (requires .beads/ directory)
-  ./beads-ralphy.sh "task"           # Single task mode (brownfield)
-  ./beads-ralphy.sh --init           # Initialize .ralphy/ config
+  ./br [options]        # Beads mode (requires .beads/ directory)
+  ./br "task"           # Single task mode (brownfield)
+  ./br --init           # Initialize .ralphy/ config
 
 ${BOLD}CONFIG & SETUP:${RESET}
   --init              Initialize .ralphy/ with smart defaults
@@ -791,16 +791,16 @@ ${BOLD}OTHER OPTIONS:${RESET}
 
 ${BOLD}EXAMPLES:${RESET}
   # Single task mode
-  ./beads-ralphy.sh --init                       # Initialize config
-  ./beads-ralphy.sh "add dark mode toggle"       # Run single task
-  ./beads-ralphy.sh "fix the login bug" --cursor # Single task with Cursor
+  ./br --init                       # Initialize config
+  ./br "add dark mode toggle"       # Run single task
+  ./br "fix the login bug" --cursor # Single task with Cursor
 
   # Beads mode (works on tasks from beads tracker)
-  ./beads-ralphy.sh                              # Run with Claude Code (ralph label)
-  ./beads-ralphy.sh --codex                      # Run with Codex CLI
-  ./beads-ralphy.sh --label critical             # Only process 'critical' labeled tasks
-  ./beads-ralphy.sh --parallel --max-parallel 4  # Run 4 tasks concurrently
-  ./beads-ralphy.sh --branch-per-task --create-pr  # Feature branch workflow
+  ./br                              # Run with Claude Code (ralph label)
+  ./br --codex                      # Run with Codex CLI
+  ./br --label critical             # Only process 'critical' labeled tasks
+  ./br --parallel --max-parallel 4  # Run 4 tasks concurrently
+  ./br --branch-per-task --create-pr  # Feature branch workflow
 
 ${BOLD}BEADS INTEGRATION:${RESET}
   Requires .beads/ directory with beads issue tracker

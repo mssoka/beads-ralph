@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Beads-Ralphy is an autonomous AI coding loop that integrates with the beads issue tracker. It uses BV (beads viewer) for dependency-aware task ranking via PageRank and executes tasks through various AI CLI tools (Claude Code, OpenCode, Cursor, Codex, Qwen-Code, Factory Droid).
 
 **Key Architecture:**
-- Single bash script (`beads-ralphy.sh`) that orchestrates everything
+- Single bash script (`br`) that orchestrates everything
 - Beads integration via `bd` (beads CLI) and `bv` (beads viewer)
 - Two execution modes: sequential and parallel (with git worktrees)
 - Configurable via `.ralphy/config.yaml` for project-specific rules
@@ -17,36 +17,36 @@ Beads-Ralphy is an autonomous AI coding loop that integrates with the beads issu
 ### Testing the Script
 ```bash
 # Single task mode (brownfield, no beads required)
-./beads-ralphy.sh "fix the login bug"
+./br "fix the login bug"
 
 # Dry run to preview task execution
-./beads-ralphy.sh --dry-run
+./br --dry-run
 
 # Preview first task from beads tracker
-./beads-ralphy.sh --dry-run --max-iterations 1
+./br --dry-run --max-iterations 1
 ```
 
 ### Running with Different AI Engines
 ```bash
-./beads-ralphy.sh --claude        # Claude Code (default)
-./beads-ralphy.sh --opencode      # OpenCode
-./beads-ralphy.sh --cursor        # Cursor agent
-./beads-ralphy.sh --codex         # Codex
-./beads-ralphy.sh --qwen          # Qwen-Code
-./beads-ralphy.sh --droid         # Factory Droid
+./br --claude        # Claude Code (default)
+./br --opencode      # OpenCode
+./br --cursor        # Cursor agent
+./br --codex         # Codex
+./br --qwen          # Qwen-Code
+./br --droid         # Factory Droid
 ```
 
 ### Testing Beads Integration
 Requires a beads project with `.beads/` directory:
 ```bash
 # Process tasks with 'ralph' label
-./beads-ralphy.sh
+./br
 
 # Filter by different label
-./beads-ralphy.sh --label critical
+./br --label critical
 
 # Parallel execution (respects dependencies)
-./beads-ralphy.sh --parallel --max-parallel 3
+./br --parallel --max-parallel 3
 ```
 
 ## Architecture Details
@@ -111,7 +111,7 @@ Status transitions handled by:
 
 ### Config System (.ralphy/)
 
-Created via `./beads-ralphy.sh --init`. Auto-detects:
+Created via `./br --init`. Auto-detects:
 - **Language**: From tsconfig.json, package.json, pyproject.toml, etc.
 - **Framework**: From package.json dependencies (Next.js, React, Express, NestJS, etc.)
 - **Commands**: From package.json scripts (test, lint, build)
@@ -140,7 +140,7 @@ boundaries:
 
 ## Important Implementation Notes
 
-### When Modifying beads-ralphy.sh
+### When Modifying br
 
 1. **Preserve AI Engine Compatibility**: All 6 engines must continue working. Test changes with at least Claude and one other engine.
 
@@ -193,10 +193,10 @@ Modify `get_next_task_beads()` which uses `bv --robot-triage` + jq to filter by 
 
 ```
 .
-├── beads-ralphy.sh       # Main executable (2712 lines)
+├── br       # Main executable (2712 lines)
 ├── README.md             # User documentation
 └── .ralphy/              # Project-specific config (created by --init)
     └── config.yaml
 ```
 
-The script is intentionally a single file for portability. All functionality is contained in bash functions within `beads-ralphy.sh`.
+The script is intentionally a single file for portability. All functionality is contained in bash functions within `br`.
