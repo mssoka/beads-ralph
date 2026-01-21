@@ -2,7 +2,7 @@
 
 ![Ralphy](assets/ralphy.jpeg)
 
-Autonomous AI coding loop for beads-tracked projects with dependency-aware task ranking and parallel execution using git worktrees.
+Autonomous AI coding loop for [beads-tracked](https://github.com/steveyegge/beads/tree/main) projects with dependency-aware task ranking and parallel execution using git worktrees.
 
 ---
 
