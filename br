@@ -1091,7 +1091,13 @@ cleanup() {
   # Show message on interrupt
   if [[ $exit_code -eq 130 ]]; then
     printf "\n"
-    log_warn "Interrupted! Cleaned up."
+    log_warn "Interrupted! Cleaning up..."
+
+    # Revert all in_progress tasks back to open
+    if command -v bd &>/dev/null; then
+      revert_in_progress_tasks
+      log_info "Reverted in_progress tasks to open"
+    fi
 
     # Show branches created if any
     if [[ -n "${task_branches[*]+"${task_branches[*]}"}" ]]; then
@@ -1169,6 +1175,40 @@ mark_task_in_progress_beads() {
 
   log_debug "Marking beads task in progress: $task_id"
   bd update "$task_id" --status=in_progress 2>&1 | grep -v '^$' || true
+}
+
+mark_task_failed_beads() {
+  local task=$1
+  local task_id=$(echo "$task" | cut -d: -f1)
+
+  log_debug "Reverting failed task to open: $task_id"
+  bd update "$task_id" --status=open 2>&1 | grep -v '^$' || true
+}
+
+revert_in_progress_tasks() {
+  # Revert all in_progress tasks with the label back to open
+  local label_filter="${BEADS_LABEL:-ralph}"
+
+  log_debug "Reverting in_progress tasks with label '$label_filter' to open"
+
+  # Get all in_progress task IDs with the label
+  local task_ids
+  task_ids=$(bd list --status=in_progress --json 2>/dev/null | \
+    jq -r --arg label "$label_filter" '.[] |
+           select(.labels | index($label)) |
+           .id' 2>/dev/null || true)
+
+  if [[ -z "$task_ids" ]]; then
+    log_debug "No in_progress tasks to revert"
+    return 0
+  fi
+
+  # Revert each task
+  while IFS= read -r task_id; do
+    [[ -z "$task_id" ]] && continue
+    log_debug "Reverting $task_id to open"
+    bd update "$task_id" --status=open 2>&1 | grep -v '^$' || true
+  done <<< "$task_ids"
 }
 
 check_and_close_parent_epic() {
@@ -2195,6 +2235,7 @@ Focus only on implementing: $task_name"
       echo "ERROR: No new commits created; treating task as failed." >> "$log_file"
       echo "failed" > "$status_file"
       echo "0 0" > "$output_file"
+      mark_task_failed_beads "$task_name"
       cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
       return 1
     fi
@@ -2224,6 +2265,7 @@ Focus only on implementing: $task_name"
   else
     echo "failed" > "$status_file"
     echo "0 0" > "$output_file"
+    mark_task_failed_beads "$task_name"
     cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
     return 1
   fi

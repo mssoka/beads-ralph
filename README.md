@@ -2,7 +2,71 @@
 
 ![Ralphy](assets/ralphy.jpeg)
 
-Autonomous AI coding loop for beads-tracked projects. Uses BV (beads viewer) for intelligent task ranking and dependency-aware parallel execution.
+Autonomous AI coding loop for beads-tracked projects with intelligent task ranking and dependency-aware parallel execution.
+
+---
+
+## ⚓ Arrr, Here Be Dragons! ☠️
+
+**AHOY MATEY!** This here ship be sailed by one lone captain on macOS seas. She runs fine fer me treasure hunts, but I be makin' NO PROMISES fer yer voyages!
+
+🏴‍☠️ **The Code of the Seven Seas:**
+- ❌ **No PRs accepted** - Me day job keeps me busy plunderin' corporate gold, no time fer code reviews!
+- ❌ **No issues/features** - If ye find bugs, they be yer shipmates now!
+- ✅ **Fork away, ye scallywag!** - Take the code, fix it, expand it, make it yer own vessel!
+- ✅ **Sail at yer own risk** - Tested only on me Mac ship. Linux? Windows? Uncharted waters!
+
+If this tool sinks yer codebase, don't come cryin' to me. Ye've been warned! 🏴‍☠️
+
+Now hoist the colors and let's write some code! ⚓
+
+---
+
+## How It Works
+
+Beads-Ralphy is a bash orchestrator that connects your beads issue tracker to AI coding agents (Claude Code, OpenCode, Cursor, etc.). It automatically fetches tasks, executes them through AI, and tracks status.
+
+### Execution Modes
+
+**Sequential Mode (Default)**
+- Processes one task at a time
+- Fetches highest-priority `open` task with your label (default: `ralph`)
+- Executes through AI agent
+- Marks task `closed` when complete
+- Repeats until no tasks remain
+
+**Parallel Mode (`--parallel`)**
+- Processes multiple tasks simultaneously using git worktrees
+- Groups tasks into "levels" based on dependencies (extracted from task descriptions/design)
+- Level 0: Tasks with no dependencies (run in parallel)
+- Level 1: Tasks that depend on Level 0 (run after Level 0 completes)
+- Level N: Tasks that depend on Level N-1
+- Each agent gets isolated workspace: separate worktree + branch
+- Auto-merges results or creates PRs (your choice)
+
+### Task Organization
+
+**Labels**: Filter which tasks to process (e.g., `--label critical` only processes tasks tagged `critical`)
+
+**Status Tracking**:
+- Tasks start as `open`
+- Marked `in_progress` when execution begins (parallel mode only)
+- Marked `closed` when AI outputs `<promise>COMPLETE</promise>`
+- Failed tasks revert to `open` for retry
+- Ctrl+C reverts all `in_progress` tasks to `open`
+
+**Task Priority**: Uses beads priority (P0-P4) and dependency analysis to determine execution order
+
+### brui - Real-Time Kanban Visualization
+
+`brui` is a companion terminal UI that displays your beads tasks in a kanban board (Open | In Progress | Done). It monitors the `.beads/` directory for changes and automatically refreshes the display when tasks update.
+
+**Update mechanism:**
+- Uses native file watching (FSEvents on macOS, inotify on Linux) for instant updates
+- Falls back to polling every 2 seconds if file watching is unavailable
+- Great for monitoring `br` progress in a separate terminal
+
+---
 
 ## Quick Start
 
@@ -77,14 +141,6 @@ ln -s $(pwd)/brui /usr/local/bin/brui
 - `gh` - for `--create-pr` support
 - `bc` - for cost calculations
 
-## How It Works
-
-Beads-Ralphy uses BV's graph-aware triage to:
-1. **Rank tasks** by PageRank (dependency-aware scoring)
-2. **Respect dependencies** via execution tracks
-3. **Execute in parallel** within each track
-4. **Auto-sync** task status with beads
-
 ## Two Modes
 
 ### Beads Mode (Default)
@@ -149,7 +205,7 @@ boundaries:
 
 ## Parallel Execution
 
-BV automatically computes execution tracks based on task dependencies:
+Beads-Ralphy automatically computes execution tracks based on task dependencies:
 
 ```bash
 ./br --parallel                  # 3 agents default
@@ -197,10 +253,10 @@ Beads-Ralphy automatically:
 - Marks tasks `closed` when complete (if AI outputs `<promise>COMPLETE</promise>`)
 - Syncs with remote after each execution track
 
-### BV Triage
-Uses BV's graph-aware ranking:
-- **PageRank**: Dependency importance
-- **Priority**: P0-P4 weighting
+### Task Ranking
+Uses multiple factors for intelligent task ordering:
+- **Dependencies**: Tasks blocking others get higher priority
+- **Priority**: P0-P4 weighting from beads
 - **Staleness**: Age since creation
 - **Urgency**: Label-based (e.g., 'critical')
 
@@ -297,11 +353,12 @@ Beads-Ralphy is a simplified, beads-focused fork of [ralphy](https://github.com/
 - Manual parallel group configuration
 
 **Added:**
-- Beads/BV integration
-- Graph-aware task ranking (PageRank)
-- Automatic dependency-respecting execution tracks
+- Beads integration with dependency analysis
+- Intelligent task ranking based on dependencies and priority
+- Automatic dependency-respecting execution levels
 - Task status auto-sync (`in_progress` → `closed`)
 - Label-based filtering
+- Real-time kanban UI (brui)
 
 **Kept:**
 - All AI engine support
