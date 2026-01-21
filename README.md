@@ -2,7 +2,7 @@
 
 ![Ralphy](assets/ralphy.jpeg)
 
-Autonomous AI coding loop for beads-tracked projects with intelligent task ranking and dependency-aware parallel execution.
+Autonomous AI coding loop for beads-tracked projects with dependency-aware task ranking and parallel execution using git worktrees.
 
 ---
 
@@ -254,7 +254,7 @@ Beads-Ralphy automatically:
 - Syncs with remote after each execution track
 
 ### Task Ranking
-Uses multiple factors for intelligent task ordering:
+Uses multiple factors for task ordering:
 - **Dependencies**: Tasks blocking others get higher priority
 - **Priority**: P0-P4 weighting from beads
 - **Staleness**: Age since creation
@@ -354,7 +354,7 @@ Beads-Ralphy is a simplified, beads-focused fork of [ralphy](https://github.com/
 
 **Added:**
 - Beads integration with dependency analysis
-- Intelligent task ranking based on dependencies and priority
+- Task ranking based on dependencies and priority
 - Automatic dependency-respecting execution levels
 - Task status auto-sync (`in_progress` → `closed`)
 - Label-based filtering
