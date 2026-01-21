@@ -1836,7 +1836,10 @@ run_single_task() {
     log_info "No more tasks found"
     return 2
   fi
-  
+
+  # Mark task as in_progress to prevent other instances from picking it up
+  mark_task_in_progress "$current_task"
+
   current_step="Thinking"
 
   # Create branch if needed
