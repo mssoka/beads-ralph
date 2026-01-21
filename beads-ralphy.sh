@@ -608,14 +608,14 @@ $never_touch
 
 If you need context from recently completed related tasks, run:
 
-  bv --robot-triage 2>/dev/null | jq -r '
-    .triage.recommendations[] |
+  bd list --json 2>/dev/null | jq -r '
+    .[] |
     select(.status == \"closed\") |
     select(.labels | index(\"${BEADS_LABEL}\")) |
     .id + \": \" + .title
   ' | head -5
 
-These are PageRank-ordered closed tasks. Use 'bd show <id>' to read details.
+These are recently closed tasks. Use 'bd show <id>' to read details.
 
 "
 
@@ -944,7 +944,7 @@ parse_args() {
 check_requirements() {
   local missing=()
 
-  # Check for beads/bv requirements
+  # Check for beads requirements
   if ! command -v jq &>/dev/null; then
     log_error "jq is required. Install from: https://jqlang.github.io/jq/"
     exit 1
@@ -952,12 +952,6 @@ check_requirements() {
 
   if ! command -v bd &>/dev/null; then
     log_error "bd CLI not found."
-    log_info "Install from: https://github.com/onbeam/beads"
-    exit 1
-  fi
-
-  if ! command -v bv &>/dev/null; then
-    log_error "bv CLI not found."
     log_info "Install from: https://github.com/onbeam/beads"
     exit 1
   fi
@@ -1115,29 +1109,29 @@ cleanup() {
 }
 
 # ============================================
-# TASK SOURCES - BEADS/BV (GLOBAL)
+# TASK SOURCES - BEADS (GLOBAL)
 # ============================================
 
 get_tasks_beads() {
   # Get all open tasks with label filter (exclude epics)
   local label_filter="${BEADS_LABEL:-ralph}"
 
-  bv --robot-triage 2>/dev/null | \
-    jq -r --arg label "$label_filter" '.triage.recommendations[] |
+  bd list --json 2>/dev/null | \
+    jq -r --arg label "$label_filter" '.[] |
            select(.status == "open") |
-           select(.type != "epic") |
+           select(.issue_type != "epic") |
            select(.labels | index($label)) |
            .id + ":" + .title' || true
 }
 
 get_next_task_beads() {
-  # Get top-ranked task from BV triage (exclude epics)
+  # Get top-ranked task from BD list (exclude epics)
   local label_filter="${BEADS_LABEL:-ralph}"
 
-  bv --robot-triage 2>/dev/null | \
-    jq -r --arg label "$label_filter" '.triage.recommendations[] |
+  bd list --json 2>/dev/null | \
+    jq -r --arg label "$label_filter" '.[] |
            select(.status == "open") |
-           select(.type != "epic") |
+           select(.issue_type != "epic") |
            select(.labels | index($label)) |
            .id + ":" + .title' | \
     head -1 | cut -c1-70 || echo ""
@@ -1238,134 +1232,80 @@ cleanup_all_completed_epics() {
   done <<< "$epics"
 }
 
-get_beads_parallel_tracks() {
-  # Get execution tracks based on dependency depth using robot-graph
-  # This replaces BV's broken track algorithm with proper parallel grouping
+get_beads_parallel_levels() {
+  # Get execution levels based on dependency depth using bd dep list
+  # Level = number of open blockers (level-0 = no blockers, level-1 = 1 blocker, etc.)
   local label_filter="${BEADS_LABEL:-ralph}"
 
-  bv --robot-graph 2>/dev/null | \
-    jq -r --arg label "$label_filter" '
-      .adjacency.nodes as $all_nodes |
-      .adjacency.edges as $all_edges |
+  # Get all open tasks with label filter (exclude epics)
+  local task_ids=$(bd list --json 2>/dev/null | \
+    jq -r --arg label "$label_filter" '.[] |
+      select(.status == "open") |
+      select(.issue_type != "epic") |
+      select(.labels | index($label)) |
+      .id')
 
-      [$all_nodes[] | select(.status == "open" and (.labels // [] | contains([$label])))] |
+  if [[ -z "$task_ids" ]]; then
+    echo "level-0"
+    return
+  fi
 
-      map({
-        id: .id,
-        title: .title,
-        blocker_count: (
-          .id as $task_id |
-          [$all_edges[] |
-            select(.type == "blocks" and .to == $task_id) |
-            .from as $blocker |
-            $all_nodes[] |
-            select(.id == $blocker and .status == "open")
-          ] | length
-        )
-      }) |
+  # For each task, count its open blockers and track the level
+  local levels_found=()
+  while IFS= read -r task_id; do
+    [[ -z "$task_id" ]] && continue
 
-      group_by(.blocker_count) | map(.[0].blocker_count) | .[] | "track-\(.)"
-    ' || echo "track-0"
+    # Get blocking dependencies (tasks that block this task)
+    local blocker_count=$(bd dep list "$task_id" --json --direction=down --type blocks 2>/dev/null | \
+      jq '[.[] | select(.status == "open")] | length' 2>/dev/null || echo "0")
+
+    # Track this level if we haven't seen it yet
+    if [[ ${#levels_found[@]} -eq 0 ]] || [[ ! " ${levels_found[@]} " =~ " ${blocker_count} " ]]; then
+      levels_found+=("$blocker_count")
+    fi
+  done <<< "$task_ids"
+
+  # Output sorted levels as level-0, level-1, etc.
+  if [[ ${#levels_found[@]} -gt 0 ]]; then
+    printf '%s\n' "${levels_found[@]}" | sort -n | sed 's/^/level-/'
+  else
+    echo "level-0"
+  fi
 }
 
-get_beads_parallel_tracks_cached() {
-  # Get execution tracks using cached graph data (avoids inconsistency from multiple BV calls)
-  # Args: $1 = bv_graph_json
-  local bv_graph_json=$1
+get_tasks_in_level_beads() {
+  local level=$1
   local label_filter="${BEADS_LABEL:-ralph}"
 
-  echo "$bv_graph_json" | \
-    jq -r --arg label "$label_filter" '
-      .adjacency.nodes as $all_nodes |
-      .adjacency.edges as $all_edges |
+  # Extract level number from level-N format
+  local level_num="${level#level-}"
 
-      [$all_nodes[] | select(.status == "open" and (.labels // [] | contains([$label])))] |
+  # Get all open tasks with label filter (exclude epics)
+  local tasks_json=$(bd list --json 2>/dev/null | \
+    jq --arg label "$label_filter" '[.[] |
+      select(.status == "open") |
+      select(.issue_type != "epic") |
+      select(.labels | index($label))]')
 
-      map({
-        id: .id,
-        title: .title,
-        blocker_count: (
-          .id as $task_id |
-          [$all_edges[] |
-            select(.type == "blocks" and .to == $task_id) |
-            .from as $blocker |
-            $all_nodes[] |
-            select(.id == $blocker and .status == "open")
-          ] | length
-        )
-      }) |
+  if [[ -z "$tasks_json" ]] || [[ "$tasks_json" == "[]" ]]; then
+    return
+  fi
 
-      group_by(.blocker_count) | map(.[0].blocker_count) | .[] | "track-\(.)"
-    ' || echo "track-0"
-}
+  # For each task, count blockers and output if it matches the requested level
+  echo "$tasks_json" | jq -r '.[] | .id' | while IFS= read -r task_id; do
+    [[ -z "$task_id" ]] && continue
 
-get_tasks_in_track_beads() {
-  local track=$1
-  local label_filter="${BEADS_LABEL:-ralph}"
+    # Get blocking dependencies (tasks that block this task)
+    local blocker_count=$(bd dep list "$task_id" --json --direction=down --type blocks 2>/dev/null | \
+      jq '[.[] | select(.status == "open")] | length' 2>/dev/null || echo "0")
 
-  # Extract track number from track-N format
-  local track_num="${track#track-}"
-
-  bv --robot-graph 2>/dev/null | \
-    jq -r --arg label "$label_filter" --arg track_num "$track_num" '
-      .adjacency.nodes as $all_nodes |
-      .adjacency.edges as $all_edges |
-
-      [$all_nodes[] |
-        select(.status == "open" and
-               (((.type // "task") == "epic") | not) and
-               (.labels // [] | contains([$label])))] |
-
-      map({
-        id: .id,
-        title: .title,
-        blocker_count: (
-          .id as $task_id |
-          [$all_edges[] |
-            select(.type == "blocks" and .to == $task_id) |
-            .from as $blocker |
-            $all_nodes[] |
-            select(.id == $blocker and .status == "open")
-          ] | length
-        )
-      }) | .[] | select(.blocker_count == ($track_num | tonumber)) | .id + ":" + .title
-    ' || true
-}
-
-get_tasks_in_track_beads_cached() {
-  # Get tasks in a specific track using cached graph data (avoids inconsistency from multiple BV calls)
-  # Args: $1 = track, $2 = bv_graph_json
-  local track=$1
-  local bv_graph_json=$2
-  local label_filter="${BEADS_LABEL:-ralph}"
-
-  # Extract track number from track-N format
-  local track_num="${track#track-}"
-
-  echo "$bv_graph_json" | \
-    jq -r --arg label "$label_filter" --arg track_num "$track_num" '
-      .adjacency.nodes as $all_nodes |
-      .adjacency.edges as $all_edges |
-
-      [$all_nodes[] |
-        select(.status == "open" and
-               (((.type // "task") == "epic") | not) and
-               (.labels // [] | contains([$label])))] |
-
-      map({
-        id: .id,
-        title: .title,
-        blocker_count: (
-          .id as $task_id |
-          [$all_edges[] |
-            select(.type == "blocks" and .to == $task_id) |
-            .from as $blocker |
-            $all_nodes[] |
-            select(.id == $blocker and .status == "open")
-          ] | length
-        )
-      }) | .[] | select(.blocker_count == ($track_num | tonumber)) | .id + ":" + .title
-    ' || true
+    # If this task's blocker count matches the requested level, output it
+    if [[ "$blocker_count" == "$level_num" ]]; then
+      # Get task title from the tasks_json
+      local title=$(echo "$tasks_json" | jq -r --arg id "$task_id" '.[] | select(.id == $id) | .title')
+      echo "${task_id}:${title}"
+    fi
+  done
 }
 
 # ============================================
@@ -1810,17 +1750,18 @@ run_single_task() {
   echo ""
   echo "${BOLD}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 
-  # Calculate progress
-  local remaining completed total
+  # Calculate progress for this session
+  local remaining
   remaining=$(count_remaining_tasks | tr -d '[:space:]')
-  completed=$(count_completed_tasks | tr -d '[:space:]')
   remaining=${remaining:-0}
-  completed=${completed:-0}
-  total=$((remaining + completed))
+
+  # Calculate total tasks in this session (tasks completed so far + remaining)
+  local session_completed=$((task_num - 1))
+  local session_total=$((session_completed + remaining))
 
   # Task number and progress
-  if [[ $total -gt 0 ]]; then
-    echo "${BOLD}┃${RESET} ${CYAN}Task $task_num of $total${RESET}"
+  if [[ $session_total -gt 0 ]]; then
+    echo "${BOLD}┃${RESET} ${CYAN}Task $task_num of $session_total${RESET}"
   else
     echo "${BOLD}┃${RESET} ${CYAN}Task $task_num${RESET}"
   fi
@@ -1841,9 +1782,9 @@ run_single_task() {
 
   echo "${BOLD}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 
-  # Show progress bar if we have totals
-  if [[ $total -gt 0 ]]; then
-    show_progress_bar "$completed" "$total"
+  # Show progress bar (uses session_completed and session_total calculated above)
+  if [[ $session_total -gt 0 ]]; then
+    show_progress_bar "$session_completed" "$session_total"
   fi
   
   if [[ -z "$current_task" ]]; then
@@ -2332,35 +2273,36 @@ run_parallel_tasks() {
 
   local batch_num=0
   local completed_branches=()
-  local tracks=()
+  local levels=()
 
-  # Cache BV graph output once to avoid inconsistency from multiple calls
-  log_debug "Caching BV graph data..."
-  local bv_graph_cache=$(bv --robot-graph 2>/dev/null || echo '{"adjacency":{"nodes":[],"edges":[]}}')
+  # Get execution levels using BD dependency data
+  while IFS= read -r level; do
+    [[ -n "$level" ]] && levels+=("$level")
+  done < <(get_beads_parallel_levels)
 
-  # Get BV execution tracks using cached graph data
-  while IFS= read -r track; do
-    [[ -n "$track" ]] && tracks+=("$track")
-  done < <(get_beads_parallel_tracks_cached "$bv_graph_cache")
+  if [[ ${#levels[@]} -eq 0 ]]; then
+    log_warn "No execution levels found"
+    return 0
+  fi
 
-  log_info "Found ${#tracks[@]} execution tracks"
+  log_info "Found ${#levels[@]} execution levels"
 
-  for track in "${tracks[@]}"; do
+  for level in "${levels[@]}"; do
     local tasks=()
-    local track_label=" (track $track)"
-    local group_completed_branches=()  # Track branches completed in this track
+    local level_label=" (level $level)"
+    local group_completed_branches=()  # Track branches completed in this level
 
-    log_info "Processing execution track $track..."
+    log_info "Processing execution level $level..."
 
-    # Get all tasks in this track using cached graph data
+    # Get all tasks in this level
     while IFS= read -r task; do
       [[ -n "$task" ]] && tasks+=("$task")
-    done < <(get_tasks_in_track_beads_cached "$track" "$bv_graph_cache")
+    done < <(get_tasks_in_level_beads "$level")
 
     [[ ${#tasks[@]} -eq 0 ]] && continue
-    log_info "Track $track has ${#tasks[@]} tasks"
+    log_info "Level $level has ${#tasks[@]} tasks"
 
-    # Mark all tasks in track as in_progress
+    # Mark all tasks in level as in_progress
     for task in "${tasks[@]}"; do
       mark_task_in_progress_beads "$task"
     done
@@ -2376,7 +2318,7 @@ run_parallel_tasks() {
 
       echo ""
       echo "${MAGENTA}╭─────────────────────────────────────────────────────────────────╮${RESET}"
-      echo "${MAGENTA}│${RESET} ${BOLD}⚡ Batch $batch_num${track_label}:${RESET} Spawning $batch_size parallel agents"
+      echo "${MAGENTA}│${RESET} ${BOLD}⚡ Batch $batch_num${level_label}:${RESET} Spawning $batch_size parallel agents"
       echo "${MAGENTA}│${RESET} ${DIM}🔄 Each agent runs in its own git worktree${RESET}"
       echo "${MAGENTA}╰─────────────────────────────────────────────────────────────────╯${RESET}"
       echo ""
@@ -2582,16 +2524,16 @@ run_parallel_tasks() {
       fi
     done
 
-    # Sync beads state after track completes
-    log_info "Track $track complete - syncing to remote..."
+    # Sync beads state after level completes
+    log_info "Level $level complete - syncing to remote..."
     bd sync 2>&1 | grep -v '^$' || log_warn "bd sync failed (non-fatal)"
 
-    # After each track completes, merge branches into integration branch
-    # so the next track sees the completed work (fixes issue #13)
+    # After each level completes, merge branches into integration branch
+    # so the next level sees the completed work (fixes issue #13)
     # NOTE: Uses git branch instead of git checkout to avoid changing HEAD while worktrees are active (Greptile review)
-    if [[ ${#group_completed_branches[@]} -gt 0 ]] && [[ ${#tracks[@]} -gt 1 ]]; then
-      local integration_branch="ralphy/integration-track-$track"
-      log_info "Creating integration branch for track $track: $integration_branch"
+    if [[ ${#group_completed_branches[@]} -gt 0 ]] && [[ ${#levels[@]} -gt 1 ]]; then
+      local integration_branch="ralphy/integration-level-$level"
+      log_info "Creating integration branch for level $level: $integration_branch"
 
       # Create integration branch from current BASE_BRANCH without switching HEAD
       # This avoids state confusion while worktrees are active
@@ -2621,23 +2563,23 @@ run_parallel_tasks() {
           fi
 
           if [[ "$merge_failed" == false ]]; then
-            # Update BASE_BRANCH for next track
+            # Update BASE_BRANCH for next level
             BASE_BRANCH="$integration_branch"
             export BASE_BRANCH
             integration_branches+=("$integration_branch")  # Track for cleanup
-            log_info "Updated BASE_BRANCH to $integration_branch for next track"
+            log_info "Updated BASE_BRANCH to $integration_branch for next level"
           else
             # Delete failed integration branch
             git branch -D "$integration_branch" >/dev/null 2>&1 || true
-            log_warn "Integration merge failed; next track will branch from current BASE_BRANCH ($BASE_BRANCH)"
+            log_warn "Integration merge failed; next level will branch from current BASE_BRANCH ($BASE_BRANCH)"
           fi
         else
           # Couldn't checkout, clean up the branch
           git branch -D "$integration_branch" >/dev/null 2>&1 || true
-          log_warn "Could not checkout integration branch; next track will branch from current BASE_BRANCH ($BASE_BRANCH)"
+          log_warn "Could not checkout integration branch; next level will branch from current BASE_BRANCH ($BASE_BRANCH)"
         fi
       else
-        log_warn "Could not create integration branch; next track will branch from current BASE_BRANCH ($BASE_BRANCH)"
+        log_warn "Could not create integration branch; next level will branch from current BASE_BRANCH ($BASE_BRANCH)"
       fi
     fi
 
@@ -2646,8 +2588,8 @@ run_parallel_tasks() {
     fi
   done
 
-  # Final sync after all tracks complete
-  log_info "All tracks complete - final sync..."
+  # Final sync after all levels complete
+  log_info "All levels complete - final sync..."
   bd sync 2>&1 | grep -v '^$' || log_warn "bd sync failed (non-fatal)"
 
   # Cleanup worktree base
