@@ -1101,7 +1101,8 @@ cleanup() {
     # Revert all in_progress tasks back to open
     if command -v bd &>/dev/null; then
       revert_in_progress_tasks
-      log_info "Reverted in_progress tasks to open"
+    else
+      log_warn "bd command not found, cannot revert tasks"
     fi
 
     # Show branches created if any
@@ -1211,8 +1212,10 @@ revert_in_progress_tasks() {
   # Revert each task
   while IFS= read -r task_id; do
     [[ -z "$task_id" ]] && continue
-    log_debug "Reverting $task_id to open"
-    bd update "$task_id" --status=open 2>&1 | grep -v '^$' || true
+    log_info "Reverting $task_id to open"
+    bd update "$task_id" --status=open 2>&1 || {
+      log_error "Failed to revert $task_id"
+    }
   done <<< "$task_ids"
 }
 
@@ -1467,8 +1470,6 @@ monitor_progress() {
   local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
   local spin_idx=0
 
-  task="${task:0:40}"
-
   while true; do
     local elapsed=$(($(date +%s) - start_time))
     local mins=$((elapsed / 60))
@@ -1502,7 +1503,7 @@ monitor_progress() {
 
     local spinner_char="${spinstr:$spin_idx:1}"
     local step_color=""
-    
+
     # Color-code steps
     case "$current_step" in
       "Thinking"|"Reading code") step_color="$CYAN" ;;
@@ -1512,10 +1513,25 @@ monitor_progress() {
       *) step_color="$BLUE" ;;
     esac
 
-    # Use tput for cleaner line clearing
-    tput cr 2>/dev/null || printf "\r"
-    tput el 2>/dev/null || true
-    printf "  %s ${step_color}%-16s${RESET} │ %s ${DIM}[%02d:%02d]${RESET}" "$spinner_char" "$current_step" "$task" "$mins" "$secs"
+    # Get terminal width and calculate available space for task name
+    local term_width
+    term_width=$(tput cols 2>/dev/null || echo 80)
+    # Format: "  X Step-name-16ch │ task-name [MM:SS]"
+    # Fixed parts: "  " (2) + spinner (1) + " " (1) + step (16) + " │ " (3) + " [" (2) + "MM:SS" (5) + "]" (1) = 31 chars
+    local fixed_width=31
+    local available_width=$((term_width - fixed_width))
+
+    # Ensure we have at least 10 chars for task name, otherwise truncate more aggressively
+    if [[ $available_width -lt 10 ]]; then
+      available_width=10
+    fi
+
+    local truncated_task="${task:0:$available_width}"
+
+    # Move to beginning of line, clear from cursor to end of screen (handles wrapped lines)
+    # \r = carriage return (move to start of line)
+    # \033[J = clear from cursor to end of screen
+    printf "\r\033[J  %s ${step_color}%-16s${RESET} │ %s ${DIM}[%02d:%02d]${RESET}" "$spinner_char" "$current_step" "$truncated_task" "$mins" "$secs"
 
     spin_idx=$(( (spin_idx + 1) % ${#spinstr} ))
     sleep 0.12
@@ -1594,7 +1610,8 @@ run_ai_command() {
       # Qwen-Code: use CLI with JSON format and auto-approve tools
       qwen --output-format stream-json \
         --approval-mode yolo \
-        -p "$prompt" > "$output_file" 2>&1 &
+        --print \
+        "$prompt" > "$output_file" 2>&1 &
       ;;
     droid)
       # Droid: use exec with stream-json output and medium autonomy for development
@@ -1614,11 +1631,12 @@ run_ai_command() {
       # Claude Code: use existing approach
       claude --dangerously-skip-permissions \
         --verbose \
+        --print \
         --output-format stream-json \
-        -p "$prompt" > "$output_file" 2>&1 &
+        "$prompt" > "$output_file" 2>&1 &
       ;;
   esac
-  
+
   ai_pid=$!
 }
 
