@@ -1598,6 +1598,8 @@ run_ai_command() {
       # OpenCode: use 'run' command with JSON format and permissive settings
       OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
         --format json \
+        --model google/gemini-3-pro-preview \
+        --variant high \
         "$prompt" > "$output_file" 2>&1 &
       ;;
     cursor)
@@ -1610,8 +1612,7 @@ run_ai_command() {
       # Qwen-Code: use CLI with JSON format and auto-approve tools
       qwen --output-format stream-json \
         --approval-mode yolo \
-        --print \
-        "$prompt" > "$output_file" 2>&1 &
+        -p "$prompt" > "$output_file" 2>&1 &
       ;;
     droid)
       # Droid: use exec with stream-json output and medium autonomy for development
@@ -1631,9 +1632,8 @@ run_ai_command() {
       # Claude Code: use existing approach
       claude --dangerously-skip-permissions \
         --verbose \
-        --print \
         --output-format stream-json \
-        "$prompt" > "$output_file" 2>&1 &
+        -p "$prompt" > "$output_file" 2>&1 &
       ;;
   esac
 
@@ -2171,6 +2171,8 @@ Focus only on implementing: $task_name"
           cd "$worktree_dir"
           OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
             --format json \
+            --model google/gemini-3-pro-preview \
+            --variant high \
             "$prompt"
         ) > "$tmpfile" 2>>"$log_file"
         ;;
@@ -2214,8 +2216,8 @@ Focus only on implementing: $task_name"
           cd "$worktree_dir"
           claude --dangerously-skip-permissions \
             --verbose \
-            -p "$prompt" \
-            --output-format stream-json
+            --output-format stream-json \
+            -p "$prompt"
         ) > "$tmpfile" 2>>"$log_file"
         ;;
     esac
