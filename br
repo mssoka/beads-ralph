@@ -2,7 +2,7 @@
 
 # ============================================
 # Beads-Ralphy - Autonomous AI Coding Loop (Beads Edition)
-# Supports Claude Code, OpenCode, Codex, Cursor, Qwen-Code and Factory Droid
+# Supports Claude Code, OpenCode, Codex, Cursor, Qwen-Code, Factory Droid and Gemini CLI
 # Runs until all tasks are complete
 # ============================================
 
@@ -725,6 +725,11 @@ run_brownfield_task() {
         --json \
         "$prompt" 2>&1 | tee "$output_file"
       ;;
+    gemini)
+      gemini --output-format stream-json \
+        --approval-mode yolo \
+        "$prompt" 2>&1 | tee "$output_file"
+      ;;
   esac
 
   local exit_code=$?
@@ -769,6 +774,7 @@ ${BOLD}AI ENGINE OPTIONS:${RESET}
   --codex             Use Codex CLI
   --qwen              Use Qwen-Code
   --droid             Use Factory Droid
+  --gemini            Use Gemini CLI
 
 ${BOLD}EXECUTION OPTIONS:${RESET}
   --max-iterations N  Stop after N iterations (0 = unlimited)
@@ -849,6 +855,10 @@ parse_args() {
         ;;
       --droid)
         AI_ENGINE="droid"
+        shift
+        ;;
+      --gemini)
+        AI_ENGINE="gemini"
         shift
         ;;
       --dry-run)
@@ -999,6 +1009,13 @@ check_requirements() {
     droid)
       if ! command -v droid &>/dev/null; then
         log_error "Factory Droid CLI not found. Install from https://docs.factory.ai/cli/getting-started/quickstart"
+        exit 1
+      fi
+      ;;
+    gemini)
+      if ! command -v gemini &>/dev/null; then
+        log_error "Gemini CLI not found."
+        log_info "Install from: https://github.com/google/gemini-cli"
         exit 1
       fi
       ;;
@@ -1628,6 +1645,12 @@ run_ai_command() {
         --output-last-message "$CODEX_LAST_MESSAGE_FILE" \
         "$prompt" > "$output_file" 2>&1 &
       ;;
+    gemini)
+      # Gemini CLI: use stream-json output with auto-approval
+      gemini --output-format stream-json \
+        --approval-mode yolo \
+        "$prompt" > "$output_file" 2>&1 &
+      ;;
     *)
       # Claude Code: use existing approach
       claude --dangerously-skip-permissions \
@@ -1737,6 +1760,33 @@ parse_ai_result() {
       # Tokens remain 0 for Droid (not exposed in exec mode)
       input_tokens=0
       output_tokens=0
+      ;;
+    gemini)
+      # Gemini CLI stream-json parsing
+      # Extract stats from final result event
+      local result_line
+      result_line=$(echo "$result" | grep '"type":"result"' | tail -1)
+
+      if [[ -n "$result_line" ]]; then
+        input_tokens=$(echo "$result_line" | jq -r '.stats.input_tokens // 0' 2>/dev/null || echo "0")
+        output_tokens=$(echo "$result_line" | jq -r '.stats.output_tokens // 0' 2>/dev/null || echo "0")
+
+        # Extract duration for tracking
+        local duration_ms
+        duration_ms=$(echo "$result_line" | jq -r '.stats.duration_ms // 0' 2>/dev/null || echo "0")
+        if [[ "$duration_ms" =~ ^[0-9]+$ ]] && [[ "$duration_ms" -gt 0 ]]; then
+          actual_cost="duration:$duration_ms"
+        fi
+      fi
+
+      # Extract response from assistant messages
+      # Collect all assistant message deltas and concatenate
+      response=$(echo "$result" | grep '"type":"message"' | grep '"role":"assistant"' | jq -rs 'map(.content // "") | join("")' 2>/dev/null || echo "")
+
+      # Fallback to task completed if no response found
+      if [[ -z "$response" ]]; then
+        response="Task completed"
+      fi
       ;;
     codex)
       if [[ -n "$CODEX_LAST_MESSAGE_FILE" ]] && [[ -f "$CODEX_LAST_MESSAGE_FILE" ]]; then
@@ -2208,6 +2258,14 @@ Focus only on implementing: $task_name"
           codex exec --full-auto \
             --json \
             --output-last-message "$CODEX_LAST_MESSAGE_FILE" \
+            "$prompt"
+        ) > "$tmpfile" 2>>"$log_file"
+        ;;
+      gemini)
+        (
+          cd "$worktree_dir"
+          gemini --output-format stream-json \
+            --approval-mode yolo \
             "$prompt"
         ) > "$tmpfile" 2>>"$log_file"
         ;;
@@ -2853,6 +2911,12 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
                 "$resolve_prompt" 2>&1
               ai_exit_code=$?
               ;;
+            gemini)
+              gemini --output-format stream-json \
+                --approval-mode yolo \
+                "$resolve_prompt" 2>&1
+              ai_exit_code=$?
+              ;;
             *)
               claude --dangerously-skip-permissions \
                 -p "$resolve_prompt" \
@@ -3020,6 +3084,7 @@ main() {
       codex) command -v codex &>/dev/null || { log_error "Codex CLI not found"; exit 1; } ;;
       qwen) command -v qwen &>/dev/null || { log_error "Qwen-Code CLI not found"; exit 1; } ;;
       droid) command -v droid &>/dev/null || { log_error "Factory Droid CLI not found"; exit 1; } ;;
+      gemini) command -v gemini &>/dev/null || { log_error "Gemini CLI not found"; exit 1; } ;;
     esac
 
     if ! git rev-parse --git-dir >/dev/null 2>&1; then
@@ -3043,6 +3108,7 @@ main() {
       codex) engine_display="Codex" ;;
       qwen) engine_display="Qwen-Code" ;;
       droid) engine_display="Factory Droid" ;;
+      gemini) engine_display="Gemini CLI" ;;
       *) engine_display="Claude Code" ;;
     esac
     echo "${BOLD}║${RESET} ${DIM}⚙️  Engine:${RESET} $engine_display"
@@ -3096,6 +3162,7 @@ main() {
     codex) engine_display="Codex" ;;
     qwen) engine_display="Qwen-Code" ;;
     droid) engine_display="Factory Droid" ;;
+    gemini) engine_display="Gemini CLI" ;;
     *) engine_display="Claude Code" ;;
   esac
   echo "${BOLD}║${RESET} ${DIM}⚙️  Engine:${RESET} $engine_display"
