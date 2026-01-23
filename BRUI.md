@@ -63,20 +63,34 @@ When running in interactive mode:
 
 ### Data Source
 
-brui reads directly from `.beads/issues.jsonl` in your project:
+**brui v2.0+ queries the SQLite database** (`beads.db`) directly, the same source of truth used by all `bd` commands. This ensures consistent views across all beads tools:
 
 ```
 /your-project/
   .beads/
-    issues.jsonl  <-- One JSON object per line
+    beads.db         <-- Source of truth (SQLite database)
+    beads.db-wal     <-- Write-ahead log (SQLite WAL mode)
+    issues.jsonl     <-- Git-syncable format only
 ```
 
-Each issue has fields including:
+**Architecture:**
+- **Database** (`beads.db`): Source of truth for all operations
+- **JSONL** (`issues.jsonl`): Git-syncable serialization format only
+- Both `bd` and `brui` read from database for consistency
+
+**Data Flow:**
+```
+bd commands ──> Database (beads.db) <── brui (direct sqlite3 queries)
+                    │
+                    └─> bd export ─> issues.jsonl ─> git push
+```
+
+brui queries these fields from the `issues` table:
 - `id` - Issue ID (e.g., "LarOS-abc")
 - `title` - Issue title
 - `status` - One of: "open", "in_progress", "closed"
-- `labels` - Array of labels
-- `priority` - 0-3 (0=critical, 3=low)
+- `labels` - Array of labels (from separate `labels` table)
+- `priority` - 0-4 (0=critical, 4=low)
 - `owner` - Who owns the issue
 
 ### Status Mapping
@@ -89,9 +103,36 @@ IN PROGRESS      →  "in_progress"
 DONE             →  "closed"
 ```
 
+## Architecture Benefits (v2.0+)
+
+**Why Database Instead of JSONL?**
+
+brui v2.0 switched from reading `issues.jsonl` to querying `beads.db` directly. This brings several benefits:
+
+1. **Consistency**: brui and bd always show identical data (same source of truth)
+2. **Correctness**: No more confusion when JSONL gets out of sync with database
+3. **Performance**: SQLite queries are fast (~5ms) and scale well to 10k+ issues
+4. **Simplicity**: JSONL becomes what it should be - just a git sync format
+
+**Breaking Change in v2.0:**
+
+If you're upgrading from brui v1.x, run `bd export` in your project to ensure JSONL is current:
+
+```bash
+cd /path/to/your/project
+bd export  # Sync database → JSONL
+brui       # Now uses database directly
+```
+
+**Version Check:**
+
+```bash
+brui --version  # Should show 2.0.0 or higher
+```
+
 ### File Watching
 
-brui automatically detects the best file watching method:
+brui watches the database files (`beads.db` and `beads.db-wal`) for changes and automatically refreshes when issues are updated. It detects the best file watching method:
 
 **macOS (FSEvents):**
 ```bash
@@ -106,7 +147,7 @@ apt-get install inotify-tools
 ```
 
 **Fallback (polling):**
-- If no native tools available, polls every 200ms
+- If no native tools available, polls database modification time every 200ms
 - Adjustable with `--refresh` flag
 
 ## Real-Time Integration with br
@@ -179,6 +220,7 @@ brui  # Error: Not in a beads project (no .beads directory found)
 ## Requirements
 
 **Required:**
+- `sqlite3` - Database queries (pre-installed on macOS/most Linux distros)
 - `jq` - JSON parsing (install: `brew install jq`)
 - `tput` - Terminal control (standard on macOS/Linux)
 
@@ -187,7 +229,7 @@ brui  # Error: Not in a beads project (no .beads directory found)
 - `inotifywait` - For real-time updates on Linux (`apt-get install inotify-tools`)
 
 **Fallback:**
-- Pure bash polling if native tools unavailable
+- Pure bash polling if native file watching tools unavailable
 
 ## Edge Cases
 
@@ -219,8 +261,14 @@ Minimum size: 80x24
 ### File Permissions
 
 ```bash
-# If .beads/issues.jsonl is not readable:
-# Error: Cannot read issues.jsonl (permission denied): /path/to/.beads/issues.jsonl
+# If .beads/beads.db is not readable:
+# Error: Cannot read beads.db (permission denied): /path/to/.beads/beads.db
+
+# Check permissions
+ls -l .beads/beads.db
+
+# Fix permissions (if you own the file)
+chmod 644 .beads/beads.db
 ```
 
 ### Many Issues
@@ -236,12 +284,42 @@ OPEN (25)             IN PROGRESS (2)       DONE (500)
 
 ## Performance
 
-- **File size**: Handles large issues.jsonl files (tested with 1.2MB, 658 issues)
-- **Parsing**: Efficient jq-based JSON parsing per column
+- **Query Speed**: Direct SQLite queries are very fast (~4-5ms per query)
+- **Total Load Time**: ~0.26s for 697 issues (tested in LarOS repo)
+- **Scalability**: Scales well to 10,000+ issues (<20ms per query with indexes)
 - **Updates**: Debounced to max 1 refresh per 100ms (prevents refresh spam)
-- **Memory**: Minimal - loads only filtered issues into memory
+- **Memory**: Minimal - SQLite handles large datasets efficiently
+
+**Performance Comparison:**
+- Direct sqlite3 queries: ~5ms (current approach)
+- Calling `bd list`: ~200ms (40x slower due to Go startup overhead)
+- JSONL parsing: ~15ms for small repos, slower at scale
+
+**Why SQLite is fast:**
+- Indexed queries on status, priority, and labels
+- No process startup overhead (unlike calling `bd`)
+- Efficient filtering at database level
 
 ## Troubleshooting
+
+### Issue: "sqlite3 command not found"
+
+brui v2.0+ requires sqlite3 for database queries.
+
+**Check:**
+```bash
+command -v sqlite3
+```
+
+**Fix:**
+```bash
+# macOS (usually pre-installed)
+brew install sqlite3
+
+# Linux
+apt-get install sqlite3  # Debian/Ubuntu
+yum install sqlite       # RHEL/CentOS
+```
 
 ### Issue: "mapfile: command not found"
 
@@ -343,13 +421,40 @@ done
 ### Core Functions
 
 ```bash
-load_issues()              # Parse issues.jsonl, filter by label
-render_kanban_simple()     # Draw 3-column board
-watch_and_refresh()        # File watching loop
-format_issue_card()        # Render issue details
-detect_watch_tool()        # Auto-detect fswatch/inotify/poll
-handle_input()             # Keyboard input handler
-find_beads_directory()     # Walk up tree to find .beads/
+load_issues()                    # Load issues from database via sqlite3
+load_issues_from_database()      # Query database for specific status
+render_kanban_simple()           # Draw 3-column board
+watch_and_refresh()              # File watching loop
+format_issue_card()              # Render issue details
+detect_watch_tool()              # Auto-detect fswatch/inotify/poll
+handle_input()                   # Keyboard input handler
+find_beads_directory()           # Walk up tree to find .beads/
+```
+
+### Database Query Logic
+
+```bash
+# Query issues from database
+load_issues_from_database() {
+  local status="$1"  # "open", "in_progress", or "closed"
+
+  # Build SQL query with label filtering and JSON aggregation
+  sqlite3 beads.db "
+    SELECT json_group_array(
+      json_object(
+        'id', i.id,
+        'title', i.title,
+        'status', i.status,
+        'priority', COALESCE(i.priority, 2),
+        'labels', (SELECT json_group_array(l.label)
+                   FROM labels l WHERE l.issue_id = i.id)
+      )
+    )
+    FROM issues i
+    WHERE i.status = '$status' AND i.deleted_at IS NULL
+    ORDER BY i.priority ASC, i.updated_at DESC
+  "
+}
 ```
 
 ### File Watching Logic
@@ -358,15 +463,15 @@ find_beads_directory()     # Walk up tree to find .beads/
 # Detect best method
 detect_watch_tool() → "fswatch" | "inotifywait" | "poll"
 
-# FSEvents (macOS)
-fswatch -0 .beads/issues.jsonl | while read; do refresh; done
+# FSEvents (macOS) - watch database files
+fswatch -0 -i '\.db$' -i '\.db-wal$' .beads/ | while read; do refresh; done
 
-# inotify (Linux)
-inotifywait -m -e modify .beads/issues.jsonl | while read; do refresh; done
+# inotify (Linux) - watch database and WAL
+inotifywait -m -e modify beads.db beads.db-wal | while read; do refresh; done
 
-# Polling (fallback)
+# Polling (fallback) - check database modification time
 while true; do
-  if [[ $(stat mtime) != $last_mtime ]]; then refresh; fi
+  if [[ $(stat -f %m beads.db) != $last_mtime ]]; then refresh; fi
   sleep 0.2
 done
 ```

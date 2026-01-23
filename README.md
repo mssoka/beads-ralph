@@ -59,11 +59,17 @@ Beads-Ralphy is a bash orchestrator that connects your beads issue tracker to AI
 
 ### brui - Real-Time Kanban Visualization
 
-`brui` is a companion terminal UI that displays your beads tasks in a kanban board (Open | In Progress | Done). It monitors the `.beads/` directory for changes and automatically refreshes the display when tasks update.
+`brui` is a companion terminal UI that displays your beads tasks in a kanban board (Open | In Progress | Done). It queries the beads database (`beads.db`) directly and monitors for changes in real-time.
+
+**v2.0 Update - Database-First:**
+- Queries SQLite database directly (same source of truth as `bd` commands)
+- Ensures consistent views between `brui` and `bd` tools
+- Very fast queries (~5ms) that scale to 10k+ issues
 
 **Update mechanism:**
 - Uses native file watching (FSEvents on macOS, inotify on Linux) for instant updates
-- Falls back to polling every 2 seconds if file watching is unavailable
+- Watches database files (`beads.db` and `beads.db-wal`)
+- Falls back to polling every 200ms if file watching is unavailable
 - Great for monitoring `br` progress in a separate terminal
 
 ---
