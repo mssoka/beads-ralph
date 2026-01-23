@@ -23,6 +23,10 @@ SHOW_CONFIG=false
 ADD_RULE=""
 AUTO_COMMIT=true
 
+# Bead creation options for single task mode
+BEAD_TYPE="task"        # Default bead type for single tasks
+BEAD_LABELS=""          # Additional labels beyond "ralph"
+
 # Runtime options
 AI_ENGINE="claude"  # claude, opencode, cursor, codex, qwen, or droid
 DRY_RUN=false
@@ -77,6 +81,9 @@ declare -a integration_branches=()  # Track integration branches for cleanup on 
 WORKTREE_BASE=""  # Base directory for parallel agent worktrees
 ORIGINAL_DIR=""   # Original working directory (for worktree operations)
 ORIGINAL_BASE_BRANCH=""  # Original base branch before integration branches
+BR_START_TIME=""  # Execution start time (epoch seconds)
+BR_END_TIME=""    # Execution end time (epoch seconds)
+BR_DURATION_SEC=0 # Total execution duration in seconds
 
 # ============================================
 # UTILITY FUNCTIONS
@@ -200,7 +207,8 @@ init_ralphy_config() {
     fi
 
     # Detect frameworks from dependencies (collect all matches)
-    local deps frameworks=()
+    local deps
+    local frameworks=()
     deps=$(jq -r '(.dependencies // {}) + (.devDependencies // {}) | keys[]' package.json 2>/dev/null || true)
 
     # Use grep for reliable exact matching
@@ -219,7 +227,9 @@ init_ralphy_config() {
     fi
 
     # Join frameworks with comma
-    framework=$(IFS=', '; echo "${frameworks[*]}")
+    if [[ ${#frameworks[@]} -gt 0 ]]; then
+      framework=$(IFS=', '; echo "${frameworks[*]}")
+    fi
 
     # Detect commands from package.json scripts
     local scripts
@@ -250,7 +260,9 @@ init_ralphy_config() {
     echo "$py_deps" | grep -qi "fastapi" && py_frameworks+=("FastAPI")
     echo "$py_deps" | grep -qi "django" && py_frameworks+=("Django")
     echo "$py_deps" | grep -qi "flask" && py_frameworks+=("Flask")
-    framework=$(IFS=', '; echo "${py_frameworks[*]}")
+    if [[ ${#py_frameworks[@]} -gt 0 ]]; then
+      framework=$(IFS=', '; echo "${py_frameworks[*]}")
+    fi
     test_cmd="pytest"
     lint_cmd="ruff check ."
 
@@ -264,6 +276,12 @@ init_ralphy_config() {
     test_cmd="cargo test"
     lint_cmd="cargo clippy"
     build_cmd="cargo build"
+
+  elif [[ -f "gleam.toml" ]]; then
+    lang="Gleam"
+    test_cmd="gleam test"
+    lint_cmd="gleam format ."
+    build_cmd="gleam build"
   fi
 
   # Show what we detected
@@ -283,7 +301,7 @@ init_ralphy_config() {
   # Create config.yaml with detected values
   cat > "$CONFIG_FILE" << EOF
 # Ralphy Configuration
-# https://github.com/michaelshimeles/ralphy
+# https://github.com/mssoka/beads-ralphy
 
 # Project info (auto-detected, edit if needed)
 project:
@@ -746,6 +764,45 @@ run_brownfield_task() {
 }
 
 # ============================================
+# BEAD CREATION FOR SINGLE TASK MODE
+# ============================================
+
+create_bead_from_task() {
+  local task_description="$1"
+  local bead_type="${BEAD_TYPE:-task}"
+  local additional_labels="${BEAD_LABELS:-}"
+
+  # Combine "ralph" with any additional labels
+  local final_labels="ralph"
+  if [[ -n "$additional_labels" ]]; then
+    final_labels="ralph,${additional_labels}"
+  fi
+
+  # Create the bead
+  local create_output
+  if ! create_output=$(bd create \
+    --title "$task_description" \
+    --type "$bead_type" \
+    --labels "$final_labels" \
+    --description "Auto-created by br for single task execution" 2>&1); then
+    log_error "Failed to create bead: $create_output"
+    return 1
+  fi
+
+  # Extract bead ID from output (bd create outputs the bead ID)
+  local bead_id
+  if [[ "$create_output" =~ (ralphy-[a-z0-9]+) ]]; then
+    bead_id="${BASH_REMATCH[1]}"
+    log_success "Created bead: $bead_id (type: $bead_type, labels: $final_labels)" >&2
+    echo "$bead_id"
+    return 0
+  else
+    log_error "Could not extract bead ID from output: $create_output"
+    return 1
+  fi
+}
+
+# ============================================
 # HELP & VERSION
 # ============================================
 
@@ -764,7 +821,9 @@ ${BOLD}CONFIG & SETUP:${RESET}
   --add-rule "..."    Add a rule to config (e.g., "Always use Zod")
 
 ${BOLD}SINGLE TASK MODE:${RESET}
-  "task description"  Run a single task (brownfield mode, quotes required)
+  "task description"  Run a single task (auto-creates bead, quotes required)
+  --type TYPE         Bead type: task, bug, feature, epic, chore (default: task)
+  --labels LABELS     Additional labels (comma-separated, always includes "ralph")
   --no-commit         Don't auto-commit after task completion
 
 ${BOLD}AI ENGINE OPTIONS:${RESET}
@@ -801,10 +860,12 @@ ${BOLD}OTHER OPTIONS:${RESET}
   --version           Show version number
 
 ${BOLD}EXAMPLES:${RESET}
-  # Single task mode
-  ./br --init                       # Initialize config
-  ./br "add dark mode toggle"       # Run single task
-  ./br "fix the login bug" --cursor # Single task with Cursor
+  # Single task mode (auto-creates beads)
+  ./br --init                             # Initialize config
+  ./br "add dark mode toggle"             # Run single task (type: task, labels: ralph)
+  ./br "fix login bug" --type bug         # Create bug-type bead
+  ./br "add tests" --labels ci,testing    # Additional labels: ralph,ci,testing
+  ./br "refactor auth" --type chore --labels security,backend --opencode
 
   # Beads mode (works on tasks from beads tracker)
   ./br                              # Run with Claude Code (ralph label)
@@ -814,8 +875,8 @@ ${BOLD}EXAMPLES:${RESET}
   ./br --branch-per-task --create-pr  # Feature branch workflow
 
 ${BOLD}BEADS INTEGRATION:${RESET}
-  Requires .beads/ directory with beads issue tracker
-  Uses BV (beads viewer) for intelligent task ranking via PageRank
+  Single task mode auto-creates beads with "ralph" label
+  Beads mode requires .beads/ directory with beads issue tracker
   Filters tasks by label (default: ralph)
   Automatically respects task dependencies
 
@@ -900,6 +961,14 @@ parse_args() {
       --draft-pr)
         PR_DRAFT=true
         shift
+        ;;
+      --type)
+        BEAD_TYPE="${2:-task}"
+        shift 2
+        ;;
+      --labels)
+        BEAD_LABELS="${2:-}"
+        shift 2
         ;;
       --label)
         BEADS_LABEL="${2:-ralph}"
@@ -1505,10 +1574,12 @@ monitor_progress() {
         current_step="Logging"
       elif echo "$content" | grep -qE 'bd close|bd update.*--status'; then
         current_step="Updating task status"
-      elif echo "$content" | grep -qE 'lint|eslint|biome|prettier'; then
+      elif echo "$content" | grep -qE 'lint|eslint|biome|prettier|gleam format'; then
         current_step="Linting"
-      elif echo "$content" | grep -qE 'vitest|jest|bun test|npm test|pytest|go test'; then
+      elif echo "$content" | grep -qE 'vitest|jest|bun test|npm test|pytest|go test|gleam test'; then
         current_step="Testing"
+      elif echo "$content" | grep -qE 'gleam build|cargo build|npm run build|go build'; then
+        current_step="Building"
       elif echo "$content" | grep -qE '\.test\.|\.spec\.|__tests__|_test\.go'; then
         current_step="Writing tests"
       elif echo "$content" | grep -qE '"tool":"[Ww]rite"|"tool":"[Ee]dit"|"name":"write"|"name":"edit"'; then
@@ -1525,7 +1596,7 @@ monitor_progress() {
     case "$current_step" in
       "Thinking"|"Reading code") step_color="$CYAN" ;;
       "Implementing"|"Writing tests") step_color="$MAGENTA" ;;
-      "Testing"|"Linting") step_color="$YELLOW" ;;
+      "Testing"|"Linting"|"Building") step_color="$YELLOW" ;;
       "Staging"|"Committing") step_color="$GREEN" ;;
       *) step_color="$BLUE" ;;
     esac
@@ -1768,8 +1839,9 @@ parse_ai_result() {
       result_line=$(echo "$result" | grep '"type":"result"' | tail -1)
 
       if [[ -n "$result_line" ]]; then
-        input_tokens=$(echo "$result_line" | jq -r '.stats.input_tokens // 0' 2>/dev/null || echo "0")
-        output_tokens=$(echo "$result_line" | jq -r '.stats.output_tokens // 0' 2>/dev/null || echo "0")
+        # Try .stats first (current assumption), fallback to .usage
+        input_tokens=$(echo "$result_line" | jq -r '.stats.input_tokens // .usage.input_tokens // 0' 2>/dev/null || echo "0")
+        output_tokens=$(echo "$result_line" | jq -r '.stats.output_tokens // .usage.output_tokens // 0' 2>/dev/null || echo "0")
 
         # Extract duration for tracking
         local duration_ms
@@ -1809,11 +1881,16 @@ parse_ai_result() {
       fi
       ;;
   esac
-  
+
   # Sanitize token counts
   [[ "$input_tokens" =~ ^[0-9]+$ ]] || input_tokens=0
   [[ "$output_tokens" =~ ^[0-9]+$ ]] || output_tokens=0
-  
+
+  # Debug output for token extraction (only if VERBOSE=true)
+  if [[ "${VERBOSE:-false}" == true ]]; then
+    echo "DEBUG: Extracted tokens - Input: $input_tokens, Output: $output_tokens, Cost: $actual_cost" >&2
+  fi
+
   echo "$response"
   echo "---TOKENS---"
   echo "$input_tokens"
@@ -2013,6 +2090,13 @@ run_single_task() {
     # Sanitize values
     [[ "$input_tokens" =~ ^[0-9]+$ ]] || input_tokens=0
     [[ "$output_tokens" =~ ^[0-9]+$ ]] || output_tokens=0
+
+    # Warn if tokens are zero for engines that should have token counts
+    if [[ "$AI_ENGINE" != "cursor" ]] && [[ "$AI_ENGINE" != "droid" ]] && [[ "$AI_ENGINE" != "codex" ]]; then
+      if [[ "$input_tokens" -eq 0 ]] && [[ "$output_tokens" -eq 0 ]]; then
+        echo "⚠️  Warning: Zero tokens extracted for $AI_ENGINE engine" >&2
+      fi
+    fi
 
     # Update totals
     total_input_tokens=$((total_input_tokens + input_tokens))
@@ -2312,6 +2396,12 @@ Focus only on implementing: $task_name"
     output_tokens=$(echo "$token_data" | sed -n '2p')
     [[ "$input_tokens" =~ ^[0-9]+$ ]] || input_tokens=0
     [[ "$output_tokens" =~ ^[0-9]+$ ]] || output_tokens=0
+
+    # Debug: Log token extraction for parallel agents
+    if [[ "${VERBOSE:-false}" == true ]]; then
+      echo "DEBUG: Parallel agent tokens - Input: $input_tokens, Output: $output_tokens" >> "$log_file"
+    fi
+
     rm -f "${tmpfile}.last"
 
     # Ensure at least one commit exists before marking success
@@ -2592,8 +2682,18 @@ run_parallel_tasks() {
             local in_tok=$(echo "$output_data" | awk '{print $1}')
             local out_tok=$(echo "$output_data" | awk '{print $2}')
             local branch=$(echo "$output_data" | awk '{print $3}')
+
+            # Validate and sanitize
             [[ "$in_tok" =~ ^[0-9]+$ ]] || in_tok=0
             [[ "$out_tok" =~ ^[0-9]+$ ]] || out_tok=0
+
+            # Warn if output file had no valid data
+            if [[ "$AI_ENGINE" != "cursor" ]] && [[ "$AI_ENGINE" != "droid" ]] && [[ "$AI_ENGINE" != "codex" ]]; then
+              if [[ "$in_tok" -eq 0 ]] && [[ "$out_tok" -eq 0 ]]; then
+                echo "⚠️  Warning: No token data found in $output_file for task: $task" >&2
+              fi
+            fi
+
             total_input_tokens=$((total_input_tokens + in_tok))
             total_output_tokens=$((total_output_tokens + out_tok))
 
@@ -2976,6 +3076,11 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
 # ============================================
 
 show_summary() {
+  # Calculate overall duration
+  if [[ -n "$BR_START_TIME" ]] && [[ -n "$BR_END_TIME" ]]; then
+    BR_DURATION_SEC=$((BR_END_TIME - BR_START_TIME))
+  fi
+
   echo ""
   echo "${BOLD}╔══════════════════════════════════════════════════════════════════${RESET}"
   echo "${BOLD}║${RESET} ${GREEN}✓ All tasks complete!${RESET} Finished $iteration task(s)."
@@ -3025,6 +3130,32 @@ show_summary() {
     fi
   fi
 
+  # Execution Time section
+  if [[ -n "$BR_START_TIME" ]] && [[ -n "$BR_END_TIME" ]]; then
+    echo ""
+    echo "  ${CYAN}⏱️  Execution Time${RESET}"
+
+    local hours=$((BR_DURATION_SEC / 3600))
+    local minutes=$(((BR_DURATION_SEC % 3600) / 60))
+    local seconds=$((BR_DURATION_SEC % 60))
+
+    # Format start and end times
+    local start_fmt=$(date -r "$BR_START_TIME" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "N/A")
+    local end_fmt=$(date -r "$BR_END_TIME" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "N/A")
+
+    echo "  ${DIM}├─ Start:    $start_fmt${RESET}"
+    echo "  ${DIM}├─ End:      $end_fmt${RESET}"
+
+    # Format duration
+    if [[ "$hours" -gt 0 ]]; then
+      echo "  ${DIM}└─ Duration: ${hours}h ${minutes}m ${seconds}s${RESET}"
+    elif [[ "$minutes" -gt 0 ]]; then
+      echo "  ${DIM}└─ Duration: ${minutes}m ${seconds}s${RESET}"
+    else
+      echo "  ${DIM}└─ Duration: ${seconds}s${RESET}"
+    fi
+  fi
+
   # Branches with tree structure
   if [[ -n "${task_branches[*]+"${task_branches[*]}"}" ]]; then
     echo ""
@@ -3050,6 +3181,7 @@ show_summary() {
 # ============================================
 
 main() {
+  BR_START_TIME=$(date +%s)
   parse_args "$@"
 
   # Handle --init mode
@@ -3076,7 +3208,7 @@ main() {
     trap cleanup EXIT
     trap 'exit 130' INT TERM HUP
 
-    # Check basic requirements (AI engine, git)
+    # Check basic requirements (AI engine, git, bd CLI)
     case "$AI_ENGINE" in
       claude) command -v claude &>/dev/null || { log_error "Claude Code CLI not found"; exit 1; } ;;
       opencode) command -v opencode &>/dev/null || { log_error "OpenCode CLI not found"; exit 1; } ;;
@@ -3092,12 +3224,27 @@ main() {
       exit 1
     fi
 
+    # Check for bd CLI
+    if ! command -v bd &>/dev/null; then
+      log_error "bd CLI not found. Install beads CLI: https://github.com/beadslabs/beads"
+      exit 1
+    fi
+
     validate_config
 
-    # Show brownfield banner
+    # Initialize .beads directory if missing
+    if [[ ! -d ".beads" ]]; then
+      log_info "Initializing .beads directory"
+      if ! bd init >/dev/null 2>&1; then
+        log_error "Failed to initialize .beads directory"
+        exit 1
+      fi
+    fi
+
+    # Show single task mode banner
     echo ""
     echo "${BOLD}╔══════════════════════════════════════════════════════════════════${RESET}"
-    echo "${BOLD}║${RESET} ${BOLD}${CYAN}🤖 Ralphy${RESET} - Single Task Mode"
+    echo "${BOLD}║${RESET} ${BOLD}${CYAN}🤖 Ralphy${RESET} - Single Task Mode (Beads Integration)"
     echo "${BOLD}╠══════════════════════════════════════════════════════════════════${RESET}"
 
     # Engine
@@ -3112,6 +3259,14 @@ main() {
       *) engine_display="Claude Code" ;;
     esac
     echo "${BOLD}║${RESET} ${DIM}⚙️  Engine:${RESET} $engine_display"
+
+    # Bead type and labels
+    local final_labels="ralph"
+    if [[ -n "$BEAD_LABELS" ]]; then
+      final_labels="ralph,${BEAD_LABELS}"
+    fi
+    echo "${BOLD}║${RESET} ${DIM}🏷️  Type:${RESET} ${BEAD_TYPE}"
+    echo "${BOLD}║${RESET} ${DIM}📌 Labels:${RESET} ${final_labels}"
 
     # Config
     if [[ -d "$RALPHY_DIR" ]]; then
@@ -3131,8 +3286,22 @@ main() {
     echo "${BOLD}╚══════════════════════════════════════════════════════════════════${RESET}"
     echo ""
 
-    run_brownfield_task "$SINGLE_TASK"
-    exit $?
+    # Create bead from task
+    log_info "Creating bead for task: $SINGLE_TASK"
+    local bead_id
+    if ! bead_id=$(create_bead_from_task "$SINGLE_TASK"); then
+      log_error "Failed to create bead. Exiting."
+      exit 1
+    fi
+    echo ""
+
+    # Switch to beads mode to execute the single task
+    # Clear SINGLE_TASK and set MAX_ITERATIONS=1 to execute only our new bead
+    SINGLE_TASK=""
+    MAX_ITERATIONS=1
+    BEADS_LABEL="ralph"
+
+    # Fall through to beads mode execution below
   fi
 
   if [[ "$DRY_RUN" == true ]] && [[ "$MAX_ITERATIONS" -eq 0 ]]; then
@@ -3202,6 +3371,7 @@ main() {
   if [[ "$PARALLEL" == true ]]; then
     run_parallel_tasks
     cleanup_all_completed_epics
+    BR_END_TIME=$(date +%s)
     show_summary
     notify_done
     exit 0
@@ -3224,6 +3394,7 @@ main() {
       2)
         # All tasks complete
         cleanup_all_completed_epics
+        BR_END_TIME=$(date +%s)
         show_summary
         notify_done
         exit 0
@@ -3238,6 +3409,7 @@ main() {
     if [[ $MAX_ITERATIONS -gt 0 ]] && [[ $iteration -ge $MAX_ITERATIONS ]]; then
       log_warn "Reached max iterations ($MAX_ITERATIONS)"
       cleanup_all_completed_epics
+      BR_END_TIME=$(date +%s)
       show_summary
       notify_done "Ralphy stopped after $MAX_ITERATIONS iterations"
       exit 0

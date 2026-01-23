@@ -198,6 +198,18 @@ boundaries:
     - "*.lock"
 ```
 
+## Supported Languages
+
+Ralphy auto-detects projects in these languages during `br --init`:
+
+| Language | Detection File | Test Command | Lint Command | Build Command |
+|----------|---------------|--------------|--------------|---------------|
+| JavaScript/TypeScript | `package.json` | `npm test` or `bun test` | `npm run lint` | `npm run build` |
+| Python | `pyproject.toml`, `requirements.txt`, `setup.py` | `pytest` | `ruff check .` | - |
+| Go | `go.mod` | `go test ./...` | `golangci-lint run` | - |
+| Rust | `Cargo.toml` | `cargo test` | `cargo clippy` | `cargo build` |
+| Gleam | `gleam.toml` | `gleam test` | `gleam format .` | `gleam build` |
+
 ## AI Engines
 
 ```bash
