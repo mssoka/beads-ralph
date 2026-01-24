@@ -41,6 +41,10 @@ CREATE_PR=false
 BASE_BRANCH=""
 PR_DRAFT=false
 
+# Merge conflict resolution
+NO_MERGE_AI=false
+MERGE_TIMEOUT=900  # 15 minutes default
+
 # Parallel execution
 PARALLEL=false
 MAX_PARALLEL=3
@@ -851,6 +855,10 @@ ${BOLD}GIT BRANCH OPTIONS:${RESET}
   --create-pr         Create a pull request after each task (requires gh CLI)
   --draft-pr          Create PRs as drafts
 
+${BOLD}MERGE CONFLICT RESOLUTION:${RESET}
+  --no-merge-ai       Disable AI merge conflict resolution
+  --merge-timeout N   Timeout for AI resolution in seconds (default: 900)
+
 ${BOLD}BEADS OPTIONS:${RESET}
   --label TAG         Filter tasks by label (default: ralph)
 
@@ -961,6 +969,16 @@ parse_args() {
       --draft-pr)
         PR_DRAFT=true
         shift
+        ;;
+      --no-merge-ai)
+        NO_MERGE_AI=true
+        export NO_MERGE_AI
+        shift
+        ;;
+      --merge-timeout)
+        MERGE_TIMEOUT="${2:-900}"
+        export MERGE_TIMEOUT
+        shift 2
         ;;
       --type)
         BEAD_TYPE="${2:-task}"
@@ -2787,10 +2805,17 @@ run_parallel_tasks() {
             log_debug "Merging $branch into $integration_branch"
             if ! git merge --no-edit "$branch" >/dev/null 2>&1; then
               log_warn "Conflict merging $branch into integration branch"
-              # Abort the merge to leave branch in clean state (Greptile review)
-              git merge --abort >/dev/null 2>&1 || true
-              merge_failed=true
-              break
+
+              # Try AI resolution for integration merge
+              if resolve_merge_conflict "$branch" "integration"; then
+                log_success "Integration conflict resolved for $branch"
+              else
+                log_error "Could not resolve integration conflict for $branch"
+                # Abort the merge to leave branch in clean state (Greptile review)
+                git merge --abort >/dev/null 2>&1 || true
+                merge_failed=true
+                break
+              fi
             fi
           done
 
@@ -2837,7 +2862,434 @@ run_parallel_tasks() {
   else
     log_warn "Preserving worktree base with dirty agents: $WORKTREE_BASE"
   fi
-  
+
+# ============================================
+# MERGE CONFLICT RESOLUTION
+# ============================================
+
+# Gather comprehensive context for merge conflict resolution
+gather_merge_context() {
+  local branch="$1"
+  local conflicted_files="$2"
+  local merge_type="${3:-final}"  # "integration" or "final"
+
+  local context=""
+
+  # 1. Get branch info
+  local base_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+  context+="BASE_BRANCH=$base_branch"$'\n'
+  context+="INCOMING_BRANCH=$branch"$'\n'
+  context+="MERGE_TYPE=$merge_type"$'\n'
+  context+=$'\n'
+
+  # 2. List conflicted files
+  context+="CONFLICTED_FILES:"$'\n'
+  context+="$conflicted_files"$'\n'
+  context+=$'\n'
+
+  # 3. Get branch diffs (comprehensive)
+  context+="BASE_BRANCH_CHANGES:"$'\n'
+  local base_diff=$(git diff MERGE_HEAD...HEAD 2>/dev/null || echo "No diff available")
+  context+="$base_diff"$'\n'
+  context+=$'\n'
+
+  context+="INCOMING_BRANCH_CHANGES:"$'\n'
+  local incoming_diff=$(git diff HEAD...MERGE_HEAD 2>/dev/null || echo "No diff available")
+  context+="$incoming_diff"$'\n'
+  context+=$'\n'
+
+  # 4. Get file history for conflicted files
+  context+="FILE_HISTORY:"$'\n'
+  while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    context+="  File: $file"$'\n'
+    local history=$(git log -n 10 --oneline -- "$file" 2>/dev/null || echo "No history")
+    context+="$history"$'\n'
+  done <<< "$conflicted_files"
+  context+=$'\n'
+
+  # 5. Extract dependencies from conflicted files
+  context+="DEPENDENCIES:"$'\n'
+  while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    if [[ -f "$file" ]]; then
+      local deps=$(grep -E "^(import|require|from)" "$file" 2>/dev/null | head -20 || echo "")
+      if [[ -n "$deps" ]]; then
+        context+="  File: $file"$'\n'
+        context+="$deps"$'\n'
+      fi
+    fi
+  done <<< "$conflicted_files"
+  context+=$'\n'
+
+  # 6. Get worktree and parallel execution context
+  if [[ -n "${completed_branches[*]}" ]]; then
+    context+="PARALLEL_WORKTREES:"$'\n'
+    for wt_branch in "${completed_branches[@]}"; do
+      context+="  Branch: $wt_branch"$'\n'
+
+      # Extract task from branch name (ralphy/agent-N-task-name)
+      local task_slug="${wt_branch#ralphy/agent-*-}"
+
+      # Try to get task description from beads
+      local task_desc=""
+      if command -v bd &>/dev/null; then
+        # List all tasks and try to match by title
+        local all_tasks=$(bd list --json 2>/dev/null | jq -r '.[] | "\(.id):\(.title)"' 2>/dev/null || echo "")
+        while IFS=: read -r task_id task_title; do
+          [[ -z "$task_id" ]] && continue
+          # Simple slug comparison (not perfect but helps)
+          if [[ "$task_slug" == *"$(echo "$task_title" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '-' | sed 's/-$//' | cut -c1-30)"* ]]; then
+            task_desc="$task_title"
+            break
+          fi
+        done <<< "$all_tasks"
+      fi
+
+      if [[ -n "$task_desc" ]]; then
+        context+="    Task: $task_desc"$'\n'
+      fi
+
+      # Get commit summary for this branch
+      local commits=$(git log --oneline "$base_branch..$wt_branch" 2>/dev/null | head -5 || echo "No commits")
+      context+="    Commits: $commits"$'\n'
+    done
+    context+=$'\n'
+  fi
+
+  # 7. For integration merges, show which agent branches were merged
+  if [[ "$merge_type" == "integration" ]] && [[ -n "${group_completed_branches[*]}" ]]; then
+    context+="INTEGRATION_MERGE_BRANCHES:"$'\n'
+    for agent_branch in "${group_completed_branches[@]}"; do
+      context+="  $agent_branch"$'\n'
+      local summary=$(git log --oneline "$base_branch..$agent_branch" 2>/dev/null | head -3 || echo "")
+      context+="$summary"$'\n'
+    done
+    context+=$'\n'
+  fi
+
+  # 8. Load project rules
+  if [[ -f "$CONFIG_FILE" ]]; then
+    local rules=$(load_ralphy_rules)
+    if [[ -n "$rules" ]]; then
+      context+="PROJECT_RULES:"$'\n'
+      context+="$rules"$'\n'
+      context+=$'\n'
+    fi
+  fi
+
+  # 9. Related files modified in both branches
+  context+="RELATED_FILES:"$'\n'
+  local related=$(git diff --name-only HEAD...MERGE_HEAD 2>/dev/null || echo "")
+  context+="$related"$'\n'
+
+  echo "$context"
+}
+
+# Build comprehensive merge resolution prompt
+build_comprehensive_merge_prompt() {
+  local branch="$1"
+  local context="$2"
+  local merge_type="$3"
+
+  local prompt="You are resolving a git merge conflict in a ralphy parallel execution.
+
+PARALLEL EXECUTION CONTEXT:
+$context
+
+YOUR TASK:
+1. Understand the parallel execution context:
+   - What was each agent/worktree trying to accomplish?
+   - Are the changes complementary or contradictory?
+   - Is this an integration merge (combining parallel work) or final merge (to base)?
+
+2. Identify why the changes conflict:
+   - Did multiple agents modify the same code?
+   - Are the changes orthogonal but touching the same lines?
+   - Or are they genuinely contradictory approaches?
+
+3. For each conflicted file:
+   - Read the file to see the conflict markers (<<<<<<< HEAD, =======, >>>>>>>)
+   - Understand both versions in context of ALL parallel work
+   - Resolve by intelligently merging both intents
+   - Remove all conflict markers
+   - Ensure the result is valid, working code
+
+4. Ensure the resolution:
+   - Preserves functionality from ALL parallel agents
+   - Follows project rules and patterns
+   - Maintains consistency with dependencies
+   - Results in valid, working code
+   - Doesn't break other parallel work
+
+AFTER RESOLUTION:
+1. For each resolved file, run: git add <file>
+2. Complete the merge with: git commit --no-edit
+
+Be thorough and careful. You have the full parallel execution context needed to solve this correctly.
+"
+
+  echo "$prompt"
+}
+
+# Format detailed diagnostics for failed merge resolution
+format_merge_diagnostics() {
+  local branch="$1"
+  local conflicted_files="$2"
+  local context="$3"
+
+  echo ""
+  log_error "Could not automatically resolve merge conflicts"
+  echo ""
+  echo "${BOLD}Diagnostics:${RESET}"
+  echo ""
+
+  echo "  ${CYAN}Conflicted files:${RESET}"
+  while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    echo "    • $file"
+  done <<< "$conflicted_files"
+  echo ""
+
+  echo "  ${CYAN}Manual resolution needed:${RESET}"
+  echo "    git merge $branch"
+  echo "    # Resolve conflicts in files above"
+  echo "    git add <files>"
+  echo "    git commit"
+  echo ""
+
+  # Save full context to log file
+  local log_dir=".ralphy/logs/merge-resolution"
+  mkdir -p "$log_dir" 2>/dev/null || true
+
+  if [[ -d "$log_dir" ]]; then
+    local log_file="$log_dir/${branch//\//-}.log"
+    {
+      echo "Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+      echo "Branch: $branch"
+      echo "Status: failed"
+      echo ""
+      echo "$context"
+    } > "$log_file"
+
+    echo "  ${DIM}Full context saved to: $log_file${RESET}"
+    echo ""
+  fi
+}
+
+# Main comprehensive merge conflict resolution
+resolve_merge_conflict() {
+  local branch="$1"
+  local merge_type="${2:-final}"  # "integration" or "final"
+
+  # Check for conflicts
+  local conflicted_files
+  conflicted_files=$(git diff --name-only --diff-filter=U 2>/dev/null)
+
+  if [[ -z "$conflicted_files" ]]; then
+    return 0  # No conflicts
+  fi
+
+  # Check if AI resolution is disabled
+  if [[ "${NO_MERGE_AI:-false}" == "true" ]]; then
+    log_warn "AI merge resolution disabled (--no-merge-ai)"
+    git merge --abort 2>/dev/null || true
+    return 1
+  fi
+
+  # Check config for merge resolution settings
+  local merge_enabled="true"
+  local merge_timeout="900"  # Default 15 minutes
+
+  if [[ -f "$CONFIG_FILE" ]] && command -v yq &>/dev/null; then
+    local config_enabled=$(yq -r '.merge_resolution.enabled // true' "$CONFIG_FILE" 2>/dev/null)
+    [[ "$config_enabled" == "false" ]] && merge_enabled="false"
+
+    local config_timeout=$(yq -r '.merge_resolution.timeout // 900' "$CONFIG_FILE" 2>/dev/null)
+    [[ "$config_timeout" =~ ^[0-9]+$ ]] && merge_timeout="$config_timeout"
+  fi
+
+  if [[ "$merge_enabled" == "false" ]]; then
+    log_warn "AI merge resolution disabled in config"
+    git merge --abort 2>/dev/null || true
+    return 1
+  fi
+
+  log_info "Resolving merge conflicts with comprehensive AI analysis..."
+  log_debug "Conflicted files: $(echo "$conflicted_files" | wc -l | tr -d ' ')"
+
+  # Gather ALL context upfront
+  log_debug "Gathering context: diffs, history, dependencies..."
+  local context
+  context=$(gather_merge_context "$branch" "$conflicted_files" "$merge_type")
+
+  # Build comprehensive prompt
+  local prompt
+  prompt=$(build_comprehensive_merge_prompt "$branch" "$context" "$merge_type")
+
+  # Save prompt to temp file for AI
+  local tmpfile
+  tmpfile=$(mktemp)
+  echo "$prompt" > "$tmpfile"
+
+  # Run AI with timeout
+  log_debug "Running AI resolution (timeout: ${merge_timeout}s)..."
+
+  local ai_output
+  ai_output=$(mktemp)
+
+  # Run AI command with timeout (reuse existing run_ai_command abstraction)
+  set +e
+  local ai_exit_code=0
+
+  # Use timeout if available
+  if command -v timeout &>/dev/null; then
+    timeout "$merge_timeout" bash -c "
+      case '$AI_ENGINE' in
+        opencode)
+          OPENCODE_PERMISSION='{\"*\":\"allow\"}' opencode run \
+            --format json \
+            --model google/gemini-3-pro-preview \
+            --variant high \
+            '$prompt' 2>&1
+          ;;
+        cursor)
+          agent --print --force \
+            --output-format stream-json \
+            '$prompt' 2>&1
+          ;;
+        qwen)
+          qwen --output-format stream-json \
+            --approval-mode yolo \
+            -p '$prompt' 2>&1
+          ;;
+        droid)
+          droid exec --output-format stream-json \
+            --auto medium \
+            '$prompt' 2>&1
+          ;;
+        codex)
+          codex exec --full-auto \
+            --json \
+            '$prompt' 2>&1
+          ;;
+        gemini)
+          gemini --output-format stream-json \
+            --approval-mode yolo \
+            '$prompt' 2>&1
+          ;;
+        *)
+          claude --dangerously-skip-permissions \
+            -p '$prompt' \
+            --output-format stream-json 2>&1
+          ;;
+      esac
+    " > "$ai_output" 2>&1
+    ai_exit_code=$?
+  else
+    # No timeout available, run directly
+    case "$AI_ENGINE" in
+      opencode)
+        OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
+          --format json \
+          --model google/gemini-3-pro-preview \
+          --variant high \
+          "$prompt" > "$ai_output" 2>&1
+        ai_exit_code=$?
+        ;;
+      cursor)
+        agent --print --force \
+          --output-format stream-json \
+          "$prompt" > "$ai_output" 2>&1
+        ai_exit_code=$?
+        ;;
+      qwen)
+        qwen --output-format stream-json \
+          --approval-mode yolo \
+          -p "$prompt" > "$ai_output" 2>&1
+        ai_exit_code=$?
+        ;;
+      droid)
+        droid exec --output-format stream-json \
+          --auto medium \
+          "$prompt" > "$ai_output" 2>&1
+        ai_exit_code=$?
+        ;;
+      codex)
+        codex exec --full-auto \
+          --json \
+          "$prompt" > "$ai_output" 2>&1
+        ai_exit_code=$?
+        ;;
+      gemini)
+        gemini --output-format stream-json \
+          --approval-mode yolo \
+          "$prompt" > "$ai_output" 2>&1
+        ai_exit_code=$?
+        ;;
+      *)
+        claude --dangerously-skip-permissions \
+          -p "$prompt" \
+          --output-format stream-json > "$ai_output" 2>&1
+        ai_exit_code=$?
+        ;;
+    esac
+  fi
+
+  set -e
+
+  # Clean up temp files
+  rm -f "$tmpfile"
+
+  # Check if AI command failed
+  if [[ $ai_exit_code -eq 124 ]]; then
+    log_error "AI resolution timed out after ${merge_timeout}s"
+    rm -f "$ai_output"
+    format_merge_diagnostics "$branch" "$conflicted_files" "$context"
+    git merge --abort 2>/dev/null || true
+    return 1
+  elif [[ $ai_exit_code -ne 0 ]]; then
+    log_error "AI command failed with exit code $ai_exit_code"
+    rm -f "$ai_output"
+    format_merge_diagnostics "$branch" "$conflicted_files" "$context"
+    git merge --abort 2>/dev/null || true
+    return 1
+  fi
+
+  rm -f "$ai_output"
+
+  # Verify resolution succeeded
+  local remaining_conflicts
+  remaining_conflicts=$(git diff --name-only --diff-filter=U 2>/dev/null || echo "")
+
+  if [[ -z "$remaining_conflicts" ]]; then
+    log_success "Merge conflict resolved successfully"
+
+    # Save successful resolution log
+    local log_dir=".ralphy/logs/merge-resolution"
+    mkdir -p "$log_dir" 2>/dev/null || true
+    if [[ -d "$log_dir" ]]; then
+      local log_file="$log_dir/${branch//\//-}.log"
+      {
+        echo "Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+        echo "Branch: $branch"
+        echo "Status: success"
+        echo "Conflicted files: $(echo "$conflicted_files" | wc -l | tr -d ' ')"
+        echo "AI engine: $AI_ENGINE"
+        echo ""
+        echo "Resolution: Successfully merged all changes"
+      } > "$log_file"
+    fi
+
+    return 0
+  else
+    log_error "AI could not resolve all conflicts"
+    format_merge_diagnostics "$branch" "$conflicted_files" "$context"
+    git merge --abort 2>/dev/null || true
+    return 1
+  fi
+}
+
   # Handle completed branches
   if [[ ${#completed_branches[@]} -gt 0 ]]; then
     echo ""
@@ -2938,127 +3390,24 @@ run_parallel_tasks() {
         fi
       done
       
-      # Use AI to resolve merge conflicts
+      # Use AI to resolve merge conflicts with comprehensive context
       if [[ ${#merge_failed[@]} -gt 0 ]]; then
         echo ""
-        echo "${BOLD}Using AI to resolve ${#merge_failed[@]} merge conflict(s)...${RESET}"
-        echo ""
-        
+
         local still_failed=()
-        
+
         for branch in "${merge_failed[@]}"; do
-          printf "  Resolving ${CYAN}%s${RESET}..." "$branch"
-          
-          # Get list of conflicted files
-          local conflicted_files
-          conflicted_files=$(git diff --name-only --diff-filter=U 2>/dev/null)
-          
-          if [[ -z "$conflicted_files" ]]; then
-            # No conflicts found (maybe already resolved or aborted)
-            git merge --abort 2>/dev/null || true
-            git merge --no-edit "$branch" >/dev/null 2>&1 || {
-              printf " ${RED}✗${RESET}\n"
-              still_failed+=("$branch")
-              git merge --abort 2>/dev/null || true
-              continue
-            }
-            printf " ${GREEN}✓${RESET}\n"
-            git branch -d "$branch" >/dev/null 2>&1 || true
-            continue
-          fi
-          
-          # Build prompt for AI to resolve conflicts
-          local resolve_prompt="You are resolving a git merge conflict. The following files have conflicts:
+          echo ""
 
-$conflicted_files
-
-For each conflicted file:
-1. Read the file to see the conflict markers (<<<<<<< HEAD, =======, >>>>>>> branch)
-2. Understand what both versions are trying to do
-3. Edit the file to resolve the conflict by combining both changes intelligently
-4. Remove all conflict markers
-5. Make sure the resulting code is valid and compiles
-
-After resolving all conflicts:
-1. Run 'git add' on each resolved file
-2. Run 'git commit --no-edit' to complete the merge
-
-Be careful to preserve functionality from BOTH branches. The goal is to integrate all features."
-
-          # Run AI to resolve conflicts
-          # Temporarily disable errexit since AI may fail
-          set +e
-          local ai_exit_code=0
-
-          case "$AI_ENGINE" in
-            opencode)
-              OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
-                --format json \
-                "$resolve_prompt" 2>&1
-              ai_exit_code=$?
-              ;;
-            cursor)
-              agent --print --force \
-                --output-format stream-json \
-                "$resolve_prompt" 2>&1
-              ai_exit_code=$?
-              ;;
-            qwen)
-              qwen --output-format stream-json \
-                --approval-mode yolo \
-                -p "$resolve_prompt" 2>&1
-              ai_exit_code=$?
-              ;;
-            droid)
-              droid exec --output-format stream-json \
-                --auto medium \
-                "$resolve_prompt" 2>&1
-              ai_exit_code=$?
-              ;;
-            codex)
-              codex exec --full-auto \
-                --json \
-                "$resolve_prompt" 2>&1
-              ai_exit_code=$?
-              ;;
-            gemini)
-              gemini --output-format stream-json \
-                --approval-mode yolo \
-                "$resolve_prompt" 2>&1
-              ai_exit_code=$?
-              ;;
-            *)
-              claude --dangerously-skip-permissions \
-                -p "$resolve_prompt" \
-                --output-format stream-json 2>&1
-              ai_exit_code=$?
-              ;;
-          esac
-
-          # Re-enable errexit
-          set -e
-
-          # Check if AI command failed
-          if [[ $ai_exit_code -ne 0 ]]; then
-            printf " ${RED}✗ (AI error: exit code $ai_exit_code)${RESET}\n"
-            still_failed+=("$branch")
-            git merge --abort 2>/dev/null || true
-            continue
-          fi
-
-          # Check if merge was completed
-          if ! git diff --name-only --diff-filter=U 2>/dev/null | grep -q .; then
-            # No more conflicts - merge succeeded
-            printf " ${GREEN}✓ (AI resolved)${RESET}\n"
+          # Use comprehensive merge resolution
+          if resolve_merge_conflict "$branch" "final"; then
+            log_success "Branch ${CYAN}$branch${RESET} merged successfully"
             git branch -d "$branch" >/dev/null 2>&1 || true
           else
-            # Still has conflicts
-            printf " ${RED}✗ (AI couldn't resolve)${RESET}\n"
             still_failed+=("$branch")
-            git merge --abort 2>/dev/null || true
           fi
         done
-        
+
         if [[ ${#still_failed[@]} -gt 0 ]]; then
           echo ""
           echo "${YELLOW}Some conflicts could not be resolved automatically:${RESET}"
@@ -3066,7 +3415,6 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
             echo "  ${YELLOW}•${RESET} $branch"
           done
           echo ""
-          echo "${DIM}Resolve conflicts manually: git merge <branch>${RESET}"
         else
           echo ""
           echo "${GREEN}All branches merged successfully!${RESET}"

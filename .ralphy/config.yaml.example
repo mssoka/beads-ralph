@@ -1,0 +1,41 @@
+# Ralphy Configuration Example
+# Copy to .ralphy/config.yaml and customize
+
+# Project context (shown to AI before each task)
+context: |
+  This is a web application built with:
+  - Frontend: React + TypeScript
+  - Backend: Node.js + Express
+  - Database: PostgreSQL
+
+# Rules that AI must follow
+rules:
+  - Use TypeScript for all new code
+  - Write tests for all new features
+  - Follow existing code patterns
+  - Update documentation when adding features
+  - Commit after each logical change
+
+# Boundaries - files AI should never touch or always test
+boundaries:
+  never_touch:
+    - .env
+    - .env.local
+    - credentials.json
+    - secrets/*.key
+
+  always_test:
+    - src/api/**/*.ts
+    - src/auth/**/*.ts
+    - src/core/**/*.ts
+
+# Merge conflict resolution (for parallel mode)
+merge_resolution:
+  # Enable AI-powered merge conflict resolution
+  enabled: true
+
+  # Timeout for AI resolution in seconds (default: 900 = 15 minutes)
+  timeout: 900
+
+  # Save detailed logs of resolution attempts
+  log_attempts: true

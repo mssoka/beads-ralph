@@ -256,7 +256,14 @@ boundaries:
   never_touch:
     - "src/legacy/**"
     - "*.lock"
+
+merge_resolution:
+  enabled: true       # AI merge conflict resolution (default: true)
+  timeout: 900        # Resolution timeout in seconds (default: 900)
+  log_attempts: true  # Save logs to .ralphy/logs/merge-resolution/
 ```
+
+See `.ralphy/config.yaml.example` for a complete configuration template.
 
 ## Supported Languages
 
@@ -304,6 +311,39 @@ Agent 3 → /tmp/xxx/agent-3 → ralphy/LarOS-ghi-build-api
 
 Without `--create-pr`: auto-merges back, AI resolves conflicts.
 With `--create-pr`: keeps branches, creates PRs.
+
+### Merge Conflict Resolution
+
+When parallel agents modify the same files, ralphy uses **comprehensive AI-powered conflict resolution**:
+
+**How it works:**
+1. **Rich Context Gathering**: Collects branch diffs, file history, dependencies, task descriptions
+2. **Single Comprehensive Resolution**: AI gets full context in one shot (like opening a fresh Claude Code instance)
+3. **Detailed Diagnostics**: If resolution fails, provides clear manual resolution steps
+
+**Configuration** (`.ralphy/config.yaml`):
+```yaml
+merge_resolution:
+  enabled: true          # Enable AI resolution (default: true)
+  timeout: 900           # Timeout in seconds (default: 900 = 15 min)
+  log_attempts: true     # Save detailed logs (default: true)
+```
+
+**CLI Options:**
+```bash
+./br --parallel --no-merge-ai        # Disable AI resolution
+./br --parallel --merge-timeout 600  # Set 10 min timeout
+```
+
+**What AI sees when resolving conflicts:**
+- All worktree branches and their tasks
+- Full diffs from both branches
+- File history (recent commits)
+- Dependencies (imports/requires)
+- Project rules from config
+- Related files modified in both branches
+
+**Logs**: Saved to `.ralphy/logs/merge-resolution/<branch-name>.log`
 
 ## Beads Integration
 
