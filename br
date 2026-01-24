@@ -1570,9 +1570,7 @@ monitor_progress() {
         current_step="Committing"
       elif echo "$content" | grep -qE 'git add|"command":"git add'; then
         current_step="Staging"
-      elif echo "$content" | grep -qE 'progress\.txt'; then
-        current_step="Logging"
-      elif echo "$content" | grep -qE 'bd close|bd update.*--status'; then
+      elif echo "$content" | grep -qE 'bd close|bd update'; then
         current_step="Updating task status"
       elif echo "$content" | grep -qE 'lint|eslint|biome|prettier|gleam format'; then
         current_step="Linting"
