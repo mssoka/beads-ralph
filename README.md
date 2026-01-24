@@ -57,21 +57,6 @@ Beads-Ralphy is a bash orchestrator that connects your beads issue tracker to AI
 
 **Task Priority**: Uses beads priority (P0-P4) and dependency analysis to determine execution order
 
-### brui - Real-Time Kanban Visualization
-
-`brui` is a companion terminal UI that displays your beads tasks in a kanban board (Open | In Progress | Done). It queries the beads database (`beads.db`) directly and monitors for changes in real-time.
-
-**v2.0 Update - Database-First:**
-- Queries SQLite database directly (same source of truth as `bd` commands)
-- Ensures consistent views between `brui` and `bd` tools
-- Very fast queries (~5ms) that scale to 10k+ issues
-
-**Update mechanism:**
-- Uses native file watching (FSEvents on macOS, inotify on Linux) for instant updates
-- Watches database files (`beads.db` and `beads.db-wal`)
-- Falls back to polling every 200ms if file watching is unavailable
-- Great for monitoring `br` progress in a separate terminal
-
 ---
 
 ## Quick Start
@@ -84,56 +69,6 @@ cd beads-ralphy && chmod +x br
 cd /path/to/your/beads/project
 /path/to/br
 ```
-
-## brui - Real-Time Kanban Board
-
-**brui** is a real-time terminal-based kanban board that visualizes your beads issues:
-
-```bash
-# View kanban board (default: ralph label)
-./brui
-
-# Show all issues
-./brui --all
-
-# Filter by different label
-./brui --label critical
-
-# Static snapshot (no auto-refresh)
-./brui --no-watch
-```
-
-**Features:**
-- 📊 Three columns: Open, In Progress, Done
-- ⚡ Real-time updates using FSEvents (macOS) or inotify (Linux)
-- 🎨 Color-coded by priority (P0=red, P1=yellow, P2=blue, P3=dim)
-- 🏷️ Label filtering (default: ralph)
-- ⌨️ Keyboard shortcuts: `q` to quit, `r` to refresh
-
-**Watch it work:**
-```bash
-# Terminal 1: Run brui to watch board
-./brui
-
-# Terminal 2: Run br
-./br --max-iterations 1
-
-# See issues move from Open → In Progress → Done in real-time!
-```
-
-**Installation:**
-```bash
-# Make executable (already done if you cloned the repo)
-chmod +x brui
-
-# Optional: Create symlink for global access
-ln -s $(pwd)/brui /usr/local/bin/brui
-```
-
-**Requirements:**
-- `jq` (JSON parsing)
-- `fswatch` (optional, for real-time updates on macOS): `brew install fswatch`
-- Falls back to polling if native file watching unavailable
 
 ## Prerequisites
 
@@ -376,7 +311,6 @@ Beads-Ralphy is a simplified, beads-focused fork of [ralphy](https://github.com/
 - Automatic dependency-respecting execution levels
 - Task status auto-sync (`in_progress` → `closed`)
 - Label-based filtering
-- Real-time kanban UI (brui)
 
 **Kept:**
 - All AI engine support
