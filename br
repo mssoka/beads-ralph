@@ -1470,6 +1470,10 @@ mark_task_in_progress() {
   mark_task_in_progress_beads "$1"
 }
 
+mark_task_failed() {
+  mark_task_failed_beads "$1"
+}
+
 # ============================================
 # GIT BRANCH MANAGEMENT
 # ============================================
@@ -2045,6 +2049,7 @@ run_single_task() {
       rm -f "$tmpfile"
       tmpfile=""
       return_to_base_branch
+      mark_task_failed "$current_task"
       return 1
     fi
 
@@ -2061,6 +2066,7 @@ run_single_task() {
       rm -f "$tmpfile"
       tmpfile=""
       return_to_base_branch
+      mark_task_failed "$current_task"
       return 1
     fi
 
@@ -2139,7 +2145,8 @@ run_single_task() {
         log_warn "Task marked complete but uncommitted changes detected"
         log_warn "The agent may have forgotten to commit. Uncommitted changes:"
         echo "$uncommitted_changes"
-        log_info "Not marking task as complete in beads - task may be retried"
+        log_info "Reverting task to open status for retry"
+        mark_task_failed "$current_task"
       else
         # Working directory is clean (ignoring .beads/ metadata), safe to mark complete
         log_debug "Working directory clean, marking task complete in beads"
@@ -2149,6 +2156,10 @@ run_single_task() {
         local task_id=$(echo "$current_task" | cut -d: -f1)
         check_and_close_parent_epic "$task_id"
       fi
+    else
+      # AI did not signal completion - revert to open for retry
+      log_debug "AI did not signal completion, reverting task to open"
+      mark_task_failed "$current_task"
     fi
 
     # Check for completion - verify by actually counting remaining tasks
@@ -2165,6 +2176,7 @@ run_single_task() {
   done
 
   return_to_base_branch
+  mark_task_failed "$current_task"
   return 1
 }
 
@@ -3313,6 +3325,10 @@ main() {
   # Check requirements
   check_requirements
   validate_config
+
+  # Revert any orphaned in_progress tasks from previous runs
+  log_debug "Checking for orphaned in_progress tasks..."
+  revert_in_progress_tasks
 
   # Show banner
   echo ""
