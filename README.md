@@ -50,12 +50,137 @@ Beads-Ralphy is a bash orchestrator that connects your beads issue tracker to AI
 
 **Status Tracking**:
 - Tasks start as `open`
-- Marked `in_progress` when execution begins (parallel mode only)
-- Marked `closed` when AI outputs `<promise>COMPLETE</promise>`
+- Marked `in_progress` when execution begins
+- Marked `closed` when AI outputs `<promise>COMPLETE</promise>` AND working directory is clean
 - Failed tasks revert to `open` for retry
+- Orphaned tasks (from crashes) auto-revert to `open` on startup
+- Tasks without COMPLETE flag revert to `open` for retry
 - Ctrl+C reverts all `in_progress` tasks to `open`
 
 **Task Priority**: Uses beads priority (P0-P4) and dependency analysis to determine execution order
+
+### Task Retry Mechanism
+
+Beads-Ralphy uses an aggressive retry strategy to ensure **tasks never get stuck** and always eventually complete:
+
+#### Two-Level Retry System
+
+**Level 1: Within-Task Retries (Transient Errors)**
+- API failures (rate limits, network errors, 500s)
+- Empty responses
+- **Strategy**: Fixed delay retry (default: 3 attempts, 5s between)
+- **Total time**: ~10 seconds before giving up
+
+**Level 2: Between-Iteration Retries (Task Completion)**
+- Missing `<promise>COMPLETE</promise>` flag
+- Uncommitted changes when COMPLETE flag present
+- Exhausted within-task retries
+- **Strategy**: Task reverts to `open`, retried on next iteration
+- **Total retries**: Unlimited (until task completes properly)
+
+#### Task Execution Flow
+
+```
+┌─────────────────────┐
+│ Task: status="open" │
+└──────────┬──────────┘
+           │
+           ↓
+    mark_in_progress()
+           │
+           ↓
+┌──────────────────────────────┐
+│ Task: status="in_progress"   │
+│                              │
+│  AI Processing Loop          │
+│  (up to MAX_RETRIES=3)       │
+└──────────┬───────────────────┘
+           │
+           ├─ Empty Response? ──────→ mark_failed() → status="open" → Retry next iteration
+           │
+           ├─ API Error? ───────────→ mark_failed() → status="open" → Retry next iteration
+           │
+           ├─ Retries Exhausted? ───→ mark_failed() → status="open" → Retry next iteration
+           │
+           └─ Success ↓
+                 │
+                 ├─ Has COMPLETE flag?
+                 │   │
+                 │   ├─ YES → Uncommitted changes?
+                 │   │         │
+                 │   │         ├─ YES → mark_failed() → status="open" → Retry
+                 │   │         │
+                 │   │         └─ NO → mark_complete() → status="closed" ✅ DONE
+                 │   │
+                 │   └─ NO → mark_failed() → status="open" → Retry next iteration
+```
+
+#### State Machine
+
+Tasks cycle between states until successful completion:
+
+```
+"open" ←──────→ "in_progress" ────→ "closed"
+  ↑                  │                  (terminal)
+  │                  │
+  └──────────────────┘
+    mark_task_failed()
+```
+
+**Key guarantee**: Tasks NEVER get stuck in `in_progress`. They either complete (`closed`) or revert for retry (`open`).
+
+#### Startup Recovery
+
+On every `br` startup:
+```bash
+1. check_requirements()
+2. validate_config()
+3. revert_in_progress_tasks()  ← Auto-cleanup orphaned tasks
+4. Start main loop
+```
+
+Any tasks left `in_progress` from crashes, kills, or hung processes are automatically recovered and made available for retry.
+
+#### Retry Scenarios
+
+**Scenario: Agent forgets COMPLETE flag**
+```
+Iteration 1: Task processed, commits made, no COMPLETE → status="open"
+Iteration 2: Agent sees existing work, sends COMPLETE → status="closed" ✅
+```
+
+**Scenario: Agent forgets to commit**
+```
+Iteration 1: COMPLETE sent, uncommitted changes detected → status="open"
+Iteration 2: Agent commits changes, COMPLETE + clean dir → status="closed" ✅
+```
+
+**Scenario: Crash during execution**
+```
+Before crash: Task status="in_progress"
+After restart: revert_in_progress_tasks() → status="open"
+Next iteration: Task picked up and processed → status="closed" ✅
+```
+
+**Scenario: API rate limit**
+```
+Try 1: 429 error, wait 5s
+Try 2: 429 error, wait 5s
+Try 3: 429 error → mark_failed() → status="open"
+Next iteration: Rate limit cleared, task succeeds → status="closed" ✅
+```
+
+#### Configuration
+
+Adjust retry behavior:
+```bash
+./br --max-retries 5      # More attempts per task (default: 3)
+./br --retry-delay 10     # Longer wait between retries (default: 5s)
+```
+
+**Total retry time** = `(MAX_RETRIES - 1) × RETRY_DELAY`
+- Default: `(3 - 1) × 5s = 10s`
+- With `--max-retries 5 --retry-delay 10`: `(5 - 1) × 10s = 40s`
 
 ---
 
