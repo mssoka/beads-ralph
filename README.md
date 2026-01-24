@@ -322,8 +322,3 @@ Beads-Ralphy is a simplified, beads-focused fork of [ralphy](https://github.com/
 ## License
 
 MIT
-
-## Credits
-
-Based on [ralphy](https://github.com/michaelshimeles/ralphy) by Michael Shimeles.
-Beads integration by Moses.
