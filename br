@@ -47,7 +47,7 @@ MERGE_TIMEOUT=900  # 15 minutes default
 
 # Parallel execution
 PARALLEL=false
-MAX_PARALLEL=3
+MAX_PARALLEL=10
 
 # Beads source options
 BEADS_LABEL="ralph"  # Default label filter for tasks
@@ -951,7 +951,7 @@ parse_args() {
         shift
         ;;
       --max-parallel)
-        MAX_PARALLEL="${2:-3}"
+        MAX_PARALLEL="${2:-10}"
         shift 2
         ;;
       --branch-per-task)
@@ -2801,7 +2801,11 @@ run_parallel_tasks() {
 
         # Temporarily checkout the integration branch to perform merges
         if git checkout "$integration_branch" >/dev/null 2>&1; then
-          for branch in "${group_completed_branches[@]}"; do
+          # Smart conflict prediction: sort branches by risk (low risk first)
+          local sorted_branches
+          mapfile -t sorted_branches < <(analyze_and_sort_branches "$BASE_BRANCH" "${group_completed_branches[@]}")
+
+          for branch in "${sorted_branches[@]}"; do
             log_debug "Merging $branch into $integration_branch"
             if ! git merge --no-edit "$branch" >/dev/null 2>&1; then
               log_warn "Conflict merging $branch into integration branch"
@@ -2862,6 +2866,134 @@ run_parallel_tasks() {
   else
     log_warn "Preserving worktree base with dirty agents: $WORKTREE_BASE"
   fi
+
+# ============================================
+# SMART CONFLICT PREDICTION
+# ============================================
+
+# Analyze branches for conflict risk and return sorted list (low risk first)
+# Usage: sorted_branches=($(analyze_and_sort_branches base_branch branch1 branch2 ...))
+analyze_and_sort_branches() {
+  local base_branch="$1"
+  shift
+  local branches=("$@")
+
+  # Return original order if only 1 branch
+  if [[ ${#branches[@]} -le 1 ]]; then
+    printf '%s\n' "${branches[@]}"
+    return 0
+  fi
+
+  # Associative arrays for tracking
+  declare -A file_to_branches  # file -> "branch1 branch2 ..."
+  declare -A branch_files       # branch -> "file1 file2 ..."
+  declare -A branch_risk        # branch -> risk_score
+
+  # Phase 1: Build file-to-branches mapping
+  for branch in "${branches[@]}"; do
+    # Get files modified in this branch
+    local files
+    files=$(git diff --name-only "$base_branch...$branch" 2>/dev/null || echo "")
+
+    if [[ -z "$files" ]]; then
+      # No files changed, very low risk
+      branch_risk["$branch"]=0
+      continue
+    fi
+
+    branch_files["$branch"]="$files"
+
+    # Map each file to branches that touch it
+    while IFS= read -r file; do
+      [[ -z "$file" ]] && continue
+      file_to_branches["$file"]+="$branch "
+    done <<< "$files"
+  done
+
+  # Phase 2: Calculate risk scores
+  for branch in "${branches[@]}"; do
+    [[ -n "${branch_risk[$branch]}" ]] && continue  # Already set (no files)
+
+    local risk=0
+    local files="${branch_files[$branch]}"
+    local file_count=0
+
+    while IFS= read -r file; do
+      [[ -z "$file" ]] && continue
+      ((file_count++))
+
+      # Count how many branches touch this file
+      local touching_branches="${file_to_branches[$file]}"
+      local overlap_count
+      overlap_count=$(echo "$touching_branches" | wc -w | tr -d ' ')
+
+      # Risk increases with overlap (5 points per overlapping branch)
+      # Subtract 1 because the branch itself is counted
+      risk=$((risk + (overlap_count - 1) * 5))
+    done <<< "$files"
+
+    # Add base risk for number of files modified (1 point per file)
+    risk=$((risk + file_count))
+
+    branch_risk["$branch"]=$risk
+  done
+
+  # Phase 3: Identify hot files and high-risk branches
+  declare -A hot_files  # file -> branch_count
+  local high_risk_count=0
+  local medium_risk_count=0
+  local low_risk_count=0
+
+  for file in "${!file_to_branches[@]}"; do
+    local count
+    count=$(echo "${file_to_branches[$file]}" | wc -w | tr -d ' ')
+    if [[ $count -gt 2 ]]; then
+      hot_files["$file"]=$count
+    fi
+  done
+
+  for branch in "${branches[@]}"; do
+    local risk=${branch_risk[$branch]}
+    if [[ $risk -gt 50 ]]; then
+      ((high_risk_count++))
+    elif [[ $risk -gt 20 ]]; then
+      ((medium_risk_count++))
+    else
+      ((low_risk_count++))
+    fi
+  done
+
+  # Phase 4: Output analysis summary
+  if [[ ${#branches[@]} -gt 3 ]]; then  # Only show for larger merges
+    log_info "=== Conflict Risk Analysis (${#branches[@]} branches) ===" >&2
+    if [[ $low_risk_count -gt 0 ]]; then
+      echo "${GREEN}✓ Low risk: $low_risk_count branches${NC}" >&2
+    fi
+    if [[ $medium_risk_count -gt 0 ]]; then
+      echo "${YELLOW}⚡ Medium risk: $medium_risk_count branches${NC}" >&2
+    fi
+    if [[ $high_risk_count -gt 0 ]]; then
+      echo "${RED}⚠️  High risk: $high_risk_count branches${NC}" >&2
+    fi
+
+    # Show hot files (touched by 3+ branches)
+    if [[ ${#hot_files[@]} -gt 0 ]]; then
+      echo "" >&2
+      echo "Hot files (multiple branches):" >&2
+      for file in "${!hot_files[@]}"; do
+        local count=${hot_files[$file]}
+        echo "  ${YELLOW}$file${NC}: $count branches" >&2
+      done
+    fi
+    echo "" >&2
+  fi
+
+  # Phase 5: Output sorted branch list (low risk first)
+  # Format: "risk_score branch_name" then sort numerically
+  for branch in "${branches[@]}"; do
+    echo "${branch_risk[$branch]} $branch"
+  done | sort -n | cut -d' ' -f2-
+}
 
 # ============================================
 # MERGE CONFLICT RESOLUTION
@@ -3374,10 +3506,14 @@ resolve_merge_conflict() {
       fi
 
       local merge_failed=()
-      
-      for branch in "${completed_branches[@]}"; do
+
+      # Smart conflict prediction: sort branches by risk (low risk first)
+      local sorted_branches
+      mapfile -t sorted_branches < <(analyze_and_sort_branches "$final_target" "${completed_branches[@]}")
+
+      for branch in "${sorted_branches[@]}"; do
         printf "  Merging ${CYAN}%s${RESET}..." "$branch"
-        
+
         # Attempt to merge
         if git merge --no-edit "$branch" >/dev/null 2>&1; then
           printf " ${GREEN}✓${RESET}\n"
