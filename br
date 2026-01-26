@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/opt/homebrew/bin/bash
 
 # ============================================
 # Beads-Ralphy - Autonomous AI Coding Loop (Beads Edition)

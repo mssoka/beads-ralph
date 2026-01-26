@@ -207,6 +207,10 @@ cd /path/to/your/beads/project
 ## Prerequisites
 
 **Required:**
+- **Bash 4+** - macOS ships with bash 3.2 which lacks required features. Install via Homebrew:
+  ```bash
+  brew install bash
+  ```
 - [beads](https://github.com/onbeam/beads) - `bd` and `bv` CLIs installed
 - `.beads/` directory in your project (run `bd init`)
 - AI CLI: [Claude Code](https://github.com/anthropics/claude-code), [OpenCode](https://opencode.ai/docs/), [Cursor](https://cursor.com), Codex, Qwen-Code, or [Factory Droid](https://docs.factory.ai/cli/getting-started/quickstart)
