@@ -48,6 +48,15 @@ Beads-Ralphy is a bash orchestrator that connects your beads issue tracker to AI
 
 **Labels**: Filter which tasks to process (e.g., `--label critical` only processes tasks tagged `critical`)
 
+**Type Filtering**: Filter by issue type (bug, feature, task, chore):
+```bash
+./br --bug              # Only process bug-type tasks
+./br --feature          # Only process feature-type tasks
+./br --task             # Only process task-type tasks
+./br --chore            # Only process chore-type tasks
+./br --bug --label v2   # Combine type + label filters
+```
+
 **Status Tracking**:
 - Tasks start as `open`
 - Marked `in_progress` when execution begins
@@ -394,6 +403,10 @@ Branch naming: `ralphy/<task-id-title-slug>`
 | Flag | What it does |
 |------|--------------|
 | `--label TAG` | Filter tasks by label (default: ralph) |
+| `--bug` | Filter to bug-type tasks only |
+| `--feature` | Filter to feature-type tasks only |
+| `--task` | Filter to task-type tasks only |
+| `--chore` | Filter to chore-type tasks only |
 | `--parallel` | Run tasks in parallel (respects dependencies) |
 | `--max-parallel N` | Max concurrent agents (default: 3) |
 | `--branch-per-task` | Create branch per task |
@@ -421,6 +434,11 @@ Branch naming: `ralphy/<task-id-title-slug>`
 
 # Custom label filter
 ./br --label critical
+
+# Type filtering
+./br --bug                    # Only bugs
+./br --feature --parallel     # Features in parallel
+./br --task --label myproject # Combine type + label
 
 # Parallel execution (3 agents, dependency-aware)
 ./br --parallel

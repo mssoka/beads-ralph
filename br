@@ -51,6 +51,7 @@ MAX_PARALLEL=10
 
 # Beads source options
 BEADS_LABEL="ralph"  # Default label filter for tasks
+BEADS_TYPE_FILTER=""  # Filter by issue_type (empty = all types except epic)
 
 # Colors (detect if terminal supports colors)
 if [[ -t 1 ]] && command -v tput &>/dev/null && [[ $(tput colors 2>/dev/null || echo 0) -ge 8 ]]; then
@@ -861,6 +862,10 @@ ${BOLD}MERGE CONFLICT RESOLUTION:${RESET}
 
 ${BOLD}BEADS OPTIONS:${RESET}
   --label TAG         Filter tasks by label (default: ralph)
+  --bug               Filter to bug-type tasks only
+  --feature           Filter to feature-type tasks only
+  --task              Filter to task-type tasks only
+  --chore             Filter to chore-type tasks only
 
 ${BOLD}OTHER OPTIONS:${RESET}
   -v, --verbose       Show debug output
@@ -879,6 +884,9 @@ ${BOLD}EXAMPLES:${RESET}
   ./br                              # Run with Claude Code (ralph label)
   ./br --codex                      # Run with Codex CLI
   ./br --label critical             # Only process 'critical' labeled tasks
+  ./br --bug                        # Only process bug-type tasks
+  ./br --feature --parallel         # Run all features in parallel
+  ./br --task --label v2            # Combine type + label filters
   ./br --parallel --max-parallel 4  # Run 4 tasks concurrently
   ./br --branch-per-task --create-pr  # Feature branch workflow
 
@@ -991,6 +999,22 @@ parse_args() {
       --label)
         BEADS_LABEL="${2:-ralph}"
         shift 2
+        ;;
+      --bug)
+        BEADS_TYPE_FILTER="bug"
+        shift
+        ;;
+      --feature)
+        BEADS_TYPE_FILTER="feature"
+        shift
+        ;;
+      --task)
+        BEADS_TYPE_FILTER="task"
+        shift
+        ;;
+      --chore)
+        BEADS_TYPE_FILTER="chore"
+        shift
         ;;
       -v|--verbose)
         VERBOSE=true
@@ -1231,24 +1255,28 @@ cleanup() {
 get_tasks_beads() {
   # Get all open tasks with label filter (exclude epics)
   local label_filter="${BEADS_LABEL:-ralph}"
+  local type_filter="${BEADS_TYPE_FILTER:-}"
 
   bd list --json 2>/dev/null | \
-    jq -r --arg label "$label_filter" '.[] |
+    jq -r --arg label "$label_filter" --arg type "$type_filter" '.[] |
            select(.status == "open") |
            select(.issue_type != "epic") |
            select(.labels | index($label)) |
+           select(if $type == "" then true else .issue_type == $type end) |
            .id + ":" + .title' || true
 }
 
 get_next_task_beads() {
   # Get top-ranked task from BD list (exclude epics)
   local label_filter="${BEADS_LABEL:-ralph}"
+  local type_filter="${BEADS_TYPE_FILTER:-}"
 
   bd list --json 2>/dev/null | \
-    jq -r --arg label "$label_filter" '.[] |
+    jq -r --arg label "$label_filter" --arg type "$type_filter" '.[] |
            select(.status == "open") |
            select(.issue_type != "epic") |
            select(.labels | index($label)) |
+           select(if $type == "" then true else .issue_type == $type end) |
            .id + ":" + .title' | \
     head -1 | cut -c1-70 || echo ""
 }
@@ -1256,19 +1284,21 @@ get_next_task_beads() {
 count_remaining_beads() {
   # Count open tasks with label
   local label_filter="${BEADS_LABEL:-ralph}"
+  local type_filter="${BEADS_TYPE_FILTER:-}"
 
   bd list --status=open --limit 0 --json 2>/dev/null | \
-    jq --arg label "$label_filter" \
-      '[.[] | select(.labels | index($label))] | length' || echo "0"
+    jq --arg label "$label_filter" --arg type "$type_filter" \
+      '[.[] | select(.labels | index($label)) | select(if $type == "" then true else .issue_type == $type end)] | length' || echo "0"
 }
 
 count_completed_beads() {
   # Count closed tasks with label
   local label_filter="${BEADS_LABEL:-ralph}"
+  local type_filter="${BEADS_TYPE_FILTER:-}"
 
   bd list --status=closed --limit 0 --json 2>/dev/null | \
-    jq --arg label "$label_filter" \
-      '[.[] | select(.labels | index($label))] | length' || echo "0"
+    jq --arg label "$label_filter" --arg type "$type_filter" \
+      '[.[] | select(.labels | index($label)) | select(if $type == "" then true else .issue_type == $type end)] | length' || echo "0"
 }
 
 mark_task_complete_beads() {
@@ -1298,14 +1328,16 @@ mark_task_failed_beads() {
 revert_in_progress_tasks() {
   # Revert all in_progress tasks with the label back to open
   local label_filter="${BEADS_LABEL:-ralph}"
+  local type_filter="${BEADS_TYPE_FILTER:-}"
 
   log_debug "Reverting in_progress tasks with label '$label_filter' to open"
 
   # Get all in_progress task IDs with the label
   local task_ids
   task_ids=$(bd list --status=in_progress --json 2>/dev/null | \
-    jq -r --arg label "$label_filter" '.[] |
+    jq -r --arg label "$label_filter" --arg type "$type_filter" '.[] |
            select(.labels | index($label)) |
+           select(if $type == "" then true else .issue_type == $type end) |
            .id' 2>/dev/null || true)
 
   if [[ -z "$task_ids" ]]; then
@@ -1388,13 +1420,15 @@ get_beads_parallel_levels() {
   # Get execution levels based on dependency depth using bd dep list
   # Level = number of open blockers (level-0 = no blockers, level-1 = 1 blocker, etc.)
   local label_filter="${BEADS_LABEL:-ralph}"
+  local type_filter="${BEADS_TYPE_FILTER:-}"
 
   # Get all open tasks with label filter (exclude epics)
   local task_ids=$(bd list --json 2>/dev/null | \
-    jq -r --arg label "$label_filter" '.[] |
+    jq -r --arg label "$label_filter" --arg type "$type_filter" '.[] |
       select(.status == "open") |
       select(.issue_type != "epic") |
       select(.labels | index($label)) |
+      select(if $type == "" then true else .issue_type == $type end) |
       .id')
 
   if [[ -z "$task_ids" ]]; then
@@ -1428,16 +1462,18 @@ get_beads_parallel_levels() {
 get_tasks_in_level_beads() {
   local level=$1
   local label_filter="${BEADS_LABEL:-ralph}"
+  local type_filter="${BEADS_TYPE_FILTER:-}"
 
   # Extract level number from level-N format
   local level_num="${level#level-}"
 
   # Get all open tasks with label filter (exclude epics)
   local tasks_json=$(bd list --json 2>/dev/null | \
-    jq --arg label "$label_filter" '[.[] |
+    jq --arg label "$label_filter" --arg type "$type_filter" '[.[] |
       select(.status == "open") |
       select(.issue_type != "epic") |
-      select(.labels | index($label))]')
+      select(.labels | index($label)) |
+      select(if $type == "" then true else .issue_type == $type end)]')
 
   if [[ -z "$tasks_json" ]] || [[ "$tasks_json" == "[]" ]]; then
     return
@@ -2516,7 +2552,7 @@ run_parallel_tasks() {
   integration_branches=()  # Reset for this run
 
   # Export variables needed by subshell agents
-  export AI_ENGINE MAX_RETRIES RETRY_DELAY BEADS_LABEL CREATE_PR PR_DRAFT
+  export AI_ENGINE MAX_RETRIES RETRY_DELAY BEADS_LABEL BEADS_TYPE_FILTER CREATE_PR PR_DRAFT
 
   local batch_num=0
   local completed_branches=()
@@ -3835,7 +3871,7 @@ main() {
   echo "${BOLD}║${RESET} ${DIM}⚙️  Engine:${RESET} $engine_display"
 
   # Source
-  echo "${BOLD}║${RESET} ${DIM}📋 Source:${RESET} beads (label: ${BEADS_LABEL:-ralph})"
+  echo "${BOLD}║${RESET} ${DIM}📋 Source:${RESET} beads (label: ${BEADS_LABEL:-ralph}${BEADS_TYPE_FILTER:+, type: $BEADS_TYPE_FILTER})"
 
   # Config
   if [[ -d "$RALPHY_DIR" ]]; then
