@@ -16,6 +16,28 @@ VERSION="4.0.0"
 
 # Ralphy config directory
 RALPHY_DIR=".ralphy"
+
+# Config file detection helpers
+detect_config_file() {
+  if [[ -f "$RALPHY_DIR/config.yaml" ]]; then
+    echo "$RALPHY_DIR/config.yaml"
+  elif [[ -f "$RALPHY_DIR/config.toml" ]]; then
+    echo "$RALPHY_DIR/config.toml"
+  else
+    echo ""
+  fi
+}
+
+get_config_format() {
+  local file="$1"
+  case "$file" in
+    *.yaml|*.yml) echo "yaml" ;;
+    *.toml) echo "toml" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+# Default config file (for backwards compatibility)
 CONFIG_FILE="$RALPHY_DIR/config.yaml"
 SINGLE_TASK=""
 INIT_MODE=false
@@ -529,23 +551,40 @@ show_ralphy_config() {
   echo "${BOLD}╰───────────────────────────────────────────────────────────────╯${RESET}"
 }
 
-# Add a rule to config.yaml
+# Add a rule to config (supports both YAML and TOML)
 add_ralphy_rule() {
   local rule="$1"
+  local config_file
+  config_file="$(detect_config_file)"
 
-  if [[ ! -f "$CONFIG_FILE" ]]; then
+  if [[ -z "$config_file" ]]; then
     log_error "No config found. Run 'ralphy --init' first."
     exit 1
   fi
 
-  if ! command -v yq &>/dev/null; then
-    log_error "yq is required to add rules. Install from https://github.com/mikefarah/yq"
-    log_info "Or manually edit $CONFIG_FILE"
+  local format
+  format="$(get_config_format "$config_file")"
+
+  if [[ "$format" == "yaml" ]]; then
+    if ! command -v yq &>/dev/null; then
+      log_error "yq is required to add rules. Install from https://github.com/mikefarah/yq"
+      log_info "Or manually edit $config_file"
+      exit 1
+    fi
+    # Add rule to the rules array (use env var to avoid YAML injection)
+    RULE="$rule" yq -i '.rules += [env(RULE)]' "$config_file"
+  elif [[ "$format" == "toml" ]]; then
+    log_error "TOML config editing not supported. Please either:"
+    log_info "  1. Convert to YAML: mv $config_file ${config_file%.toml}.yaml"
+    log_info "  2. Manually add the rule to $config_file"
+    log_info ""
+    log_info "Rule to add: $rule"
+    exit 1
+  else
+    log_error "Unknown config format: $config_file"
     exit 1
   fi
 
-  # Add rule to the rules array (use env var to avoid YAML injection)
-  RULE="$rule" yq -i '.rules += [env(RULE)]' "$CONFIG_FILE"
   log_success "Added rule: $rule"
 }
 
