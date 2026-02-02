@@ -3302,13 +3302,19 @@ run_parallel_tasks() {
       for ((i = batch_start; i < batch_end; i++)); do
         local task="${tasks[$i]}"
         local task_short="${task:0:50}"
+        local future_agent_num=$((iteration + display_agent_num))
+        local task_id=$(echo "$task" | cut -d: -f1)
+        local log_preview=$(get_task_log_path "$task_id" "agent$future_agent_num")
 
         if [[ $display_agent_num -eq 1 ]]; then
           echo "  ${CYAN}┌─ Agent $display_agent_num${RESET} │ $task_short"
+          echo "  ${CYAN}│${RESET}   ${DIM}Log: $log_preview${RESET}"
         elif [[ $display_agent_num -eq $batch_size ]]; then
           echo "  ${CYAN}└─ Agent $display_agent_num${RESET} │ $task_short"
+          echo "       ${DIM}Log: $log_preview${RESET}"
         else
           echo "  ${CYAN}├─ Agent $display_agent_num${RESET} │ $task_short"
+          echo "  ${CYAN}│${RESET}   ${DIM}Log: $log_preview${RESET}"
         fi
         ((display_agent_num++))
       done
