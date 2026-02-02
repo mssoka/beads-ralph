@@ -112,6 +112,14 @@ BR_START_TIME=""  # Execution start time (epoch seconds)
 BR_END_TIME=""    # Execution end time (epoch seconds)
 BR_DURATION_SEC=0 # Total execution duration in seconds
 
+# Code review state (defaults - can be overridden by config then CLI)
+CODE_REVIEW_ENABLED=true    # Default on, use --no-review to disable
+MAX_REVIEW_ITERATIONS=3
+REVIEW_TIMEOUT=600
+REVIEW_ENGINE=""            # Empty = use same as AI_ENGINE
+# Note: Iteration count persisted via task notes (get/set/clear_review_iteration)
+# for cross-process safety in parallel mode
+
 # ============================================
 # UTILITY FUNCTIONS
 # ============================================
@@ -359,6 +367,21 @@ boundaries:
     # - "src/legacy/**"
     # - "migrations/**"
     # - "*.lock"
+
+# Code Review - automatic review after task completion
+review:
+  enabled: true           # Default on. CLI --no-review overrides.
+  max_iterations: 3       # CLI --max-review-iterations overrides
+  timeout: 600            # Seconds. CLI --review-timeout overrides
+  engine: ""              # Empty = same as work agent. CLI --review-engine overrides
+  run_tests: true
+  run_build: true
+  criteria:
+    - "Code follows project patterns"
+    - "Tests present and passing"
+    - "No obvious bugs or security issues"
+    - "Acceptance criteria met"
+  custom_criteria: []
 EOF
 
   log_success "Created $RALPHY_DIR/"
@@ -401,7 +424,7 @@ validate_config() {
     fi
 
     # Validate known top-level keys
-    local known_keys=("project" "commands" "rules" "boundaries")
+    local known_keys=("project" "commands" "rules" "boundaries" "review")
     local actual_keys
     actual_keys=$(yq -r 'keys | .[]' "$CONFIG_FILE" 2>/dev/null)
 
@@ -426,6 +449,26 @@ validate_config() {
   fi
 
   return 0
+}
+
+# Load review config from config.yaml (called BEFORE parse_args so CLI overrides config)
+load_review_config() {
+  if [[ ! -f "$CONFIG_FILE" ]] || ! command -v yq &>/dev/null; then
+    return
+  fi
+
+  # Only override if config values are set (CLI takes final precedence later)
+  local cfg_enabled cfg_max cfg_timeout cfg_engine
+  cfg_enabled=$(yq -r '.review.enabled // ""' "$CONFIG_FILE" 2>/dev/null)
+  cfg_max=$(yq -r '.review.max_iterations // ""' "$CONFIG_FILE" 2>/dev/null)
+  cfg_timeout=$(yq -r '.review.timeout // ""' "$CONFIG_FILE" 2>/dev/null)
+  cfg_engine=$(yq -r '.review.engine // ""' "$CONFIG_FILE" 2>/dev/null)
+
+  [[ "$cfg_enabled" == "true" ]] && CODE_REVIEW_ENABLED=true
+  [[ "$cfg_enabled" == "false" ]] && CODE_REVIEW_ENABLED=false
+  [[ "$cfg_max" =~ ^[1-9][0-9]*$ ]] && MAX_REVIEW_ITERATIONS="$cfg_max"
+  [[ "$cfg_timeout" =~ ^[1-9][0-9]*$ ]] && REVIEW_TIMEOUT="$cfg_timeout"
+  [[ -n "$cfg_engine" ]] && REVIEW_ENGINE="$cfg_engine"
 }
 
 # Load rules from config.yaml
@@ -633,6 +676,17 @@ build_beads_prompt() {
   local acceptance=$(echo "$task_data" | jq -r '.acceptance // ""')
 
   local prompt=""
+
+  # Include previous review feedback if task was rejected
+  local review_feedback
+  review_feedback=$(get_review_feedback "$task")
+  if [[ -n "$review_feedback" ]]; then
+    prompt+="## IMPORTANT: Previous Review Feedback
+Your previous implementation was rejected. Address these issues:
+$review_feedback
+
+"
+  fi
 
   # Add project context if available
   local context
@@ -899,6 +953,14 @@ ${BOLD}MERGE CONFLICT RESOLUTION:${RESET}
   --no-merge-ai       Disable AI merge conflict resolution
   --merge-timeout N   Timeout for AI resolution in seconds (default: 900)
 
+${BOLD}CODE REVIEW:${RESET}
+  --review                    Enable code review step (override config)
+  --no-review                 Disable code review step (override config)
+  --max-review-iterations N   Max review cycles before force-complete (default: 3)
+  --review-timeout N          Review timeout in seconds (default: 600)
+  --review-engine ENGINE      AI engine for review: claude|opencode|cursor|qwen|droid|codex|gemini
+                              (default: same as work agent)
+
 ${BOLD}BEADS OPTIONS:${RESET}
   --label TAG         Filter tasks by label (default: ralph)
   --bug               Filter to bug-type tasks only
@@ -1025,6 +1087,46 @@ parse_args() {
       --merge-timeout)
         MERGE_TIMEOUT="${2:-900}"
         export MERGE_TIMEOUT
+        shift 2
+        ;;
+      --review)
+        CODE_REVIEW_ENABLED=true
+        shift
+        ;;
+      --no-review)
+        CODE_REVIEW_ENABLED=false
+        shift
+        ;;
+      --max-review-iterations)
+        if [[ -z "${2:-}" ]] || ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+          log_error "--max-review-iterations requires a positive integer (got: ${2:-empty})"
+          exit 1
+        fi
+        MAX_REVIEW_ITERATIONS="$2"
+        shift 2
+        ;;
+      --review-timeout)
+        if [[ -z "${2:-}" ]] || ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+          log_error "--review-timeout requires a positive integer in seconds (got: ${2:-empty})"
+          exit 1
+        fi
+        REVIEW_TIMEOUT="$2"
+        shift 2
+        ;;
+      --review-engine)
+        case "${2:-}" in
+          claude|opencode|cursor|qwen|droid|codex|gemini)
+            REVIEW_ENGINE="$2"
+            ;;
+          "")
+            log_error "--review-engine requires a value: claude|opencode|cursor|qwen|droid|codex|gemini"
+            exit 1
+            ;;
+          *)
+            log_error "Unknown review engine: $2. Valid: claude|opencode|cursor|qwen|droid|codex|gemini"
+            exit 1
+            ;;
+        esac
         shift 2
         ;;
       --type)
@@ -1362,6 +1464,329 @@ mark_task_failed_beads() {
 
   log_debug "Reverting failed task to open: $task_id"
   bd update "$task_id" --status=open 2>&1 | grep -v '^$' || true
+}
+
+# ============================================
+# CODE REVIEW FUNCTIONS
+# ============================================
+
+# Get persisted iteration count from task notes
+get_review_iteration() {
+  local task="$1"
+  local task_id=$(echo "$task" | cut -d: -f1)
+  local notes
+  notes=$(bd show "$task_id" --json 2>/dev/null | jq -r '.[0].notes // ""')
+
+  # Extract iteration count from notes (format: [REVIEW_ITERATION:N])
+  if [[ "$notes" =~ \[REVIEW_ITERATION:([0-9]+)\] ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "0"
+  fi
+}
+
+# Persist iteration count to task notes
+set_review_iteration() {
+  local task="$1" iteration="$2"
+  local task_id=$(echo "$task" | cut -d: -f1)
+  local notes
+  notes=$(bd show "$task_id" --json 2>/dev/null | jq -r '.[0].notes // ""')
+
+  # Remove old iteration marker if present
+  notes=$(echo "$notes" | sed 's/\[REVIEW_ITERATION:[0-9]*\]//g')
+  # Add new iteration marker
+  notes="[REVIEW_ITERATION:$iteration]$notes"
+
+  bd update "$task_id" --notes "$notes" 2>&1 | grep -v '^$' || true
+}
+
+# Remove iteration tracking from task notes
+clear_review_iteration() {
+  local task="$1"
+  local task_id=$(echo "$task" | cut -d: -f1)
+  local notes
+  notes=$(bd show "$task_id" --json 2>/dev/null | jq -r '.[0].notes // ""')
+
+  # Remove iteration marker
+  notes=$(echo "$notes" | sed 's/\[REVIEW_ITERATION:[0-9]*\]//g')
+
+  bd update "$task_id" --notes "$notes" 2>&1 | grep -v '^$' || true
+}
+
+# Get previous review feedback from task notes
+get_review_feedback() {
+  local task="$1"
+  local task_id=$(echo "$task" | cut -d: -f1)
+  local notes
+  notes=$(bd show "$task_id" --json 2>/dev/null | jq -r '.[0].notes // ""')
+  if [[ "$notes" == *"[REVIEW FEEDBACK]"* ]]; then
+    echo "$notes" | sed -n '/\[REVIEW FEEDBACK\]/,$p' | head -50
+  fi
+}
+
+# Update task notes with review feedback
+update_task_with_feedback() {
+  local task="$1" feedback="$2" iteration="$3"
+  local task_id=$(echo "$task" | cut -d: -f1)
+  local existing_notes timestamp new_notes
+
+  existing_notes=$(bd show "$task_id" --json 2>/dev/null | jq -r '.[0].notes // ""')
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  new_notes="$existing_notes
+
+[REVIEW FEEDBACK - Iteration $iteration - $timestamp]
+$feedback
+[END REVIEW FEEDBACK]"
+
+  bd update "$task_id" --notes "$new_notes" 2>&1 | grep -v '^$' || true
+  log_info "Review feedback added to task $task_id"
+}
+
+# Build the code review prompt
+build_review_prompt() {
+  local task="$1" iteration="${2:-1}"
+  local task_id=$(echo "$task" | cut -d: -f1)
+
+  local task_data title description acceptance design notes
+  task_data=$(bd show "$task_id" --json 2>/dev/null | jq '.[0]')
+  title=$(echo "$task_data" | jq -r '.title')
+  description=$(echo "$task_data" | jq -r '.description // ""')
+  acceptance=$(echo "$task_data" | jq -r '.acceptance // ""')
+  design=$(echo "$task_data" | jq -r '.design // ""')
+  notes=$(echo "$task_data" | jq -r '.notes // ""')
+
+  local diff_content changed_files
+  # Try HEAD~1 first, fall back to clean patch format for first commit
+  if git rev-parse HEAD~1 &>/dev/null; then
+    diff_content=$(git diff HEAD~1 2>/dev/null)
+    changed_files=$(git diff --name-only HEAD~1 2>/dev/null)
+  else
+    # First commit on branch - use git log to get clean patch
+    diff_content=$(git log -1 -p --format="" HEAD 2>/dev/null || echo "No diff available")
+    changed_files=$(git log -1 --name-only --format="" HEAD 2>/dev/null)
+  fi
+
+  # Read config options with defaults
+  local run_tests run_build test_cmd build_cmd
+  run_tests=$(yq -r '.review.run_tests // true' "$CONFIG_FILE" 2>/dev/null || echo "true")
+  run_build=$(yq -r '.review.run_build // true' "$CONFIG_FILE" 2>/dev/null || echo "true")
+  test_cmd=$(yq -r '.commands.test // "npm test"' "$CONFIG_FILE" 2>/dev/null || echo "npm test")
+  build_cmd=$(yq -r '.commands.build // "npm run build"' "$CONFIG_FILE" 2>/dev/null || echo "npm run build")
+
+  # Build validation instructions based on config
+  local validation_steps=""
+  local step_num=1
+  if [[ "$run_tests" == "true" ]]; then
+    validation_steps+="$step_num. Run tests: $test_cmd
+"
+    ((step_num++))
+  fi
+  if [[ "$run_build" == "true" ]]; then
+    validation_steps+="$step_num. Run build: $build_cmd
+"
+    ((step_num++))
+  fi
+  validation_steps+="$step_num. Analyze code quality, patterns, security
+"
+  ((step_num++))
+  validation_steps+="$step_num. Verify acceptance criteria"
+
+  # Build criteria from config (criteria + custom_criteria)
+  local criteria custom_criteria all_criteria
+  criteria=$(yq -r '.review.criteria // [] | .[]' "$CONFIG_FILE" 2>/dev/null | sed 's/^/- /')
+  custom_criteria=$(yq -r '.review.custom_criteria // [] | .[]' "$CONFIG_FILE" 2>/dev/null | sed 's/^/- /')
+
+  if [[ -n "$criteria" ]] && [[ -n "$custom_criteria" ]]; then
+    all_criteria="$criteria
+$custom_criteria"
+  elif [[ -n "$criteria" ]]; then
+    all_criteria="$criteria"
+  elif [[ -n "$custom_criteria" ]]; then
+    all_criteria="$custom_criteria"
+  else
+    all_criteria="- Code quality
+- Tests pass
+- Acceptance criteria met"
+  fi
+
+  local rules
+  rules=$(load_ralphy_rules)
+
+  cat <<PROMPT
+You are a thorough code reviewer. Review this implementation objectively against the acceptance criteria and project standards.
+
+## Task: $task_id - $title
+Review Iteration: $iteration
+
+### Description
+$description
+
+### Acceptance Criteria
+$acceptance
+
+${design:+### Design
+$design}
+
+${notes:+### Task Notes
+$notes}
+
+${rules:+## Project Rules
+$rules}
+
+## Review Criteria
+$all_criteria
+
+## Changed Files
+$changed_files
+
+## Diff
+\`\`\`diff
+$diff_content
+\`\`\`
+
+## Your Task
+$validation_steps
+
+## Decision
+
+After thorough review:
+
+**APPROVE if:**
+- All acceptance criteria are met
+- No bugs, security issues, or broken tests
+- Code follows project patterns (minor style issues are OK)
+
+**REJECT if:**
+- Any acceptance criteria is not met
+- Tests fail or are missing for new functionality
+- Security vulnerabilities or obvious bugs exist
+- Code violates project rules
+
+Output EXACTLY one of:
+
+<review>APPROVED</review>
+<summary>Brief summary: what was implemented, tests verified, criteria met.</summary>
+
+OR
+
+<review>REJECTED</review>
+<feedback>
+1. [Issue]: [Description] → [How to fix]
+2. [Issue]: [Description] → [How to fix]
+(List ALL issues found, be specific)
+</feedback>
+<summary>Brief summary for task notes.</summary>
+PROMPT
+}
+
+# Run code review - Returns: 0=approved, 1=rejected, 2=max_iter, 3=timeout
+run_code_review() {
+  local task="$1"
+  local task_id=$(echo "$task" | cut -d: -f1)
+
+  if [[ "$CODE_REVIEW_ENABLED" != "true" ]]; then
+    log_debug "Code review disabled, skipping"
+    return 0
+  fi
+
+  # Get/increment iteration count - PERSISTED via task notes for cross-process tracking
+  local iteration
+  iteration=$(get_review_iteration "$task")
+  ((iteration++))
+  set_review_iteration "$task" "$iteration"
+
+  if [[ $iteration -gt $MAX_REVIEW_ITERATIONS ]]; then
+    log_warn "Max review iterations ($MAX_REVIEW_ITERATIONS) reached for $task_id"
+    clear_review_iteration "$task"
+    return 2
+  fi
+
+  log_info "Running code review (iteration $iteration/$MAX_REVIEW_ITERATIONS)..."
+
+  local prompt_file result_file review_result
+  prompt_file=$(mktemp)
+  result_file=$(mktemp)
+
+  # Write prompt to file to avoid shell quoting issues
+  build_review_prompt "$task" "$iteration" > "$prompt_file"
+
+  # Determine which engine to use
+  local engine="${REVIEW_ENGINE:-$AI_ENGINE}"
+
+  # Run with enforced timeout - use file-based prompt passing
+  local timeout_exit=0
+  if command -v timeout &>/dev/null; then
+    # GNU timeout (Linux) - exit code 124 on timeout
+    timeout "$REVIEW_TIMEOUT" bash -c '
+      engine="$1"
+      prompt_file="$2"
+      case "$engine" in
+        opencode)
+          OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode run --format json --model google/gemini-3-pro-preview --variant high "$(cat "$prompt_file")"
+          ;;
+        cursor)
+          agent --print --force --output-format stream-json "$(cat "$prompt_file")"
+          ;;
+        *)
+          claude --dangerously-skip-permissions -p "$(cat "$prompt_file")" --output-format stream-json
+          ;;
+      esac
+    ' _ "$engine" "$prompt_file" > "$result_file" 2>&1
+    timeout_exit=$?
+  else
+    # macOS: use perl-based timeout - exit code 142 (128+14) on SIGALRM
+    perl -e 'alarm shift; exec @ARGV' "$REVIEW_TIMEOUT" bash -c '
+      prompt_file="$1"
+      claude --dangerously-skip-permissions -p "$(cat "$prompt_file")" --output-format stream-json
+    ' _ "$prompt_file" > "$result_file" 2>&1
+    timeout_exit=$?
+  fi
+
+  rm -f "$prompt_file"
+
+  # Check for timeout: GNU=124, macOS perl=142 (128+SIGALRM)
+  if [[ $timeout_exit -eq 124 ]] || [[ $timeout_exit -eq 142 ]]; then
+    log_warn "Code review timed out after ${REVIEW_TIMEOUT}s"
+    rm -f "$result_file"
+    update_task_with_feedback "$task" "Review timed out after ${REVIEW_TIMEOUT}s. Will retry." "$iteration"
+    return 3
+  fi
+
+  review_result=$(cat "$result_file" 2>/dev/null || echo "")
+  rm -f "$result_file"
+
+  if [[ -z "$review_result" ]]; then
+    log_warn "Empty review response, treating as rejected"
+    update_task_with_feedback "$task" "Review agent returned empty response." "$iteration"
+    return 1
+  fi
+
+  # Parse decision
+  if [[ "$review_result" == *"<review>APPROVED</review>"* ]]; then
+    log_success "Code review APPROVED"
+    # Extract and store summary in task notes
+    local summary
+    summary=$(echo "$review_result" | sed -n '/<summary>/,/<\/summary>/p' | sed '1d;$d')
+    [[ -n "$summary" ]] && update_task_with_feedback "$task" "APPROVED: $summary" "$iteration"
+    # Clear persisted iteration counter on approval
+    clear_review_iteration "$task"
+    return 0
+  elif [[ "$review_result" == *"<review>REJECTED</review>"* ]]; then
+    log_warn "Code review REJECTED"
+    local feedback summary
+    feedback=$(echo "$review_result" | sed -n '/<feedback>/,/<\/feedback>/p' | sed '1d;$d')
+    summary=$(echo "$review_result" | sed -n '/<summary>/,/<\/summary>/p' | sed '1d;$d')
+    [[ -z "$feedback" ]] && feedback="Rejected without specific feedback."
+    [[ -n "$summary" ]] && feedback="$feedback
+
+Summary: $summary"
+    update_task_with_feedback "$task" "$feedback" "$iteration"
+    return 1
+  else
+    log_warn "Unclear review decision, treating as rejected"
+    update_task_with_feedback "$task" "Review agent did not provide APPROVED/REJECTED." "$iteration"
+    return 1
+  fi
 }
 
 revert_in_progress_tasks() {
@@ -2241,13 +2666,33 @@ run_single_task() {
         log_info "Reverting task to open status for retry"
         mark_task_failed "$current_task"
       else
-        # Working directory is clean (ignoring .beads/ metadata), safe to mark complete
-        log_debug "Working directory clean, marking task complete in beads"
-        mark_task_complete "$current_task"
+        # Working directory is clean, run code review
+        local review_status
+        run_code_review "$current_task"
+        review_status=$?
 
-        # Check if parent epic should be closed
         local task_id=$(echo "$current_task" | cut -d: -f1)
-        check_and_close_parent_epic "$task_id"
+
+        case $review_status in
+          0)  # Approved (counter already reset in run_code_review)
+              log_debug "Review passed, marking task complete"
+              mark_task_complete "$current_task"
+              check_and_close_parent_epic "$task_id"
+              ;;
+          1)  # Rejected
+              log_info "Review rejected, task will retry with feedback"
+              mark_task_failed "$current_task"
+              ;;
+          2)  # Max iterations reached (counter already cleared in run_code_review)
+              log_warn "Max review iterations reached, force-completing"
+              mark_task_complete "$current_task"
+              check_and_close_parent_epic "$task_id"
+              ;;
+          3)  # Timeout - treat as rejected for retry
+              log_warn "Review timed out, task will retry"
+              mark_task_failed "$current_task"
+              ;;
+        esac
       fi
     else
       # AI did not signal completion - revert to open for retry
@@ -2507,6 +2952,20 @@ Focus only on implementing: $task_name"
 
     rm -f "${tmpfile}.last"
 
+    # Check if AI signaled task completion (align with sequential mode)
+    # The prompt instructs: "When THIS TASK is complete, output <promise>COMPLETE</promise>"
+    # Without this signal, we can't be sure the agent finished vs got interrupted
+    if [[ "$result" != *"<promise>COMPLETE</promise>"* ]]; then
+      echo "ERROR: Agent did not output COMPLETE signal." >> "$log_file"
+      echo "  The agent may have been interrupted or failed silently." >> "$log_file"
+      echo "  Expected: <promise>COMPLETE</promise> in agent output." >> "$log_file"
+      echo "failed" > "$status_file"
+      echo "0 0" > "$output_file"
+      mark_task_failed_beads "$task_name"
+      cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
+      return 1
+    fi
+
     # Ensure at least one commit exists before marking success
     local commit_count
     commit_count=$(git -C "$worktree_dir" rev-list --count "$BASE_BRANCH"..HEAD 2>/dev/null || echo "0")
@@ -2519,29 +2978,119 @@ Focus only on implementing: $task_name"
       cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
       return 1
     fi
-    
-    # Create PR if requested
-    if [[ "$CREATE_PR" == true ]]; then
-      (
-        cd "$worktree_dir"
-        git push -u origin "$branch_name" 2>>"$log_file" || true
-        gh pr create \
-          --base "$BASE_BRANCH" \
-          --head "$branch_name" \
-          --title "$task_name" \
-          --body "Automated implementation by Ralphy (Agent $agent_num)" \
-          ${PR_DRAFT:+--draft} 2>>"$log_file" || true
-      )
+
+    # Run code review in worktree context
+    local review_status=0
+    if [[ "$CODE_REVIEW_ENABLED" == "true" ]]; then
+      # Get task_id for iteration tracking
+      local task_id=$(echo "$task_name" | cut -d: -f1)
+
+      # Get/increment iteration count - PERSISTED via task notes (cross-process safe)
+      local iteration
+      iteration=$(get_review_iteration "$task_name")
+      ((iteration++))
+      set_review_iteration "$task_name" "$iteration"
+
+      # Check max iterations BEFORE running review
+      if [[ $iteration -gt $MAX_REVIEW_ITERATIONS ]]; then
+        echo "Max review iterations ($MAX_REVIEW_ITERATIONS) reached, force-completing" >> "$log_file"
+        clear_review_iteration "$task_name"
+        # Skip review, treat as approved
+        review_status=0
+      else
+        echo "Running code review (iteration $iteration/$MAX_REVIEW_ITERATIONS)..." >> "$log_file"
+
+        local prompt_file result_file review_result
+        prompt_file=$(mktemp)
+        result_file=$(mktemp)
+
+        # Write prompt to file to avoid shell quoting issues
+        (cd "$worktree_dir" && build_review_prompt "$task_name" "$iteration") > "$prompt_file"
+
+        local engine="${REVIEW_ENGINE:-$AI_ENGINE}"
+        local timeout_exit=0
+
+        if command -v timeout &>/dev/null; then
+          # GNU timeout - exit code 124
+          timeout "$REVIEW_TIMEOUT" bash -c '
+            engine="$1"
+            prompt_file="$2"
+            worktree_dir="$3"
+            cd "$worktree_dir"
+            case "$engine" in
+              opencode)
+                OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode run --format json "$(cat "$prompt_file")"
+                ;;
+              *)
+                claude --dangerously-skip-permissions -p "$(cat "$prompt_file")" --output-format stream-json
+                ;;
+            esac
+          ' _ "$engine" "$prompt_file" "$worktree_dir" > "$result_file" 2>>"$log_file"
+          timeout_exit=$?
+        else
+          # macOS perl - exit code 142
+          perl -e 'alarm shift; exec @ARGV' "$REVIEW_TIMEOUT" bash -c '
+            prompt_file="$1"
+            worktree_dir="$2"
+            cd "$worktree_dir"
+            claude --dangerously-skip-permissions -p "$(cat "$prompt_file")" --output-format stream-json
+          ' _ "$prompt_file" "$worktree_dir" > "$result_file" 2>>"$log_file"
+          timeout_exit=$?
+        fi
+
+        rm -f "$prompt_file"
+        review_result=$(cat "$result_file" 2>/dev/null || echo "")
+        rm -f "$result_file"
+
+        # Check for timeout: GNU=124, macOS perl=142
+        if [[ $timeout_exit -eq 124 ]] || [[ $timeout_exit -eq 142 ]]; then
+          echo "Review timed out after ${REVIEW_TIMEOUT}s" >> "$log_file"
+          update_task_with_feedback "$task_name" "Review timed out after ${REVIEW_TIMEOUT}s. Will retry." "$iteration"
+          review_status=3
+        elif [[ "$review_result" == *"<review>APPROVED</review>"* ]]; then
+          echo "Review APPROVED" >> "$log_file"
+          # Extract and store summary
+          local summary
+          summary=$(echo "$review_result" | sed -n '/<summary>/,/<\/summary>/p' | sed '1d;$d')
+          [[ -n "$summary" ]] && update_task_with_feedback "$task_name" "APPROVED: $summary" "$iteration"
+          # Clear persisted iteration counter
+          clear_review_iteration "$task_name"
+          review_status=0
+        else
+          echo "Review REJECTED or unclear" >> "$log_file"
+          local feedback
+          feedback=$(echo "$review_result" | sed -n '/<feedback>/,/<\/feedback>/p' | sed '1d;$d')
+          [[ -z "$feedback" ]] && feedback="Rejected without specific feedback."
+          update_task_with_feedback "$task_name" "$feedback" "$iteration"
+          review_status=1
+        fi
+      fi
     fi
-    
-    # Write success output
-    echo "done" > "$status_file"
-    echo "$input_tokens $output_tokens $branch_name" > "$output_file"
-    
-    # Cleanup worktree (but keep branch)
-    cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
-    
-    return 0
+
+    if [[ $review_status -eq 0 ]]; then
+      # Approved - continue to PR creation
+      if [[ "$CREATE_PR" == true ]]; then
+        (
+          cd "$worktree_dir"
+          git push -u origin "$branch_name" 2>>"$log_file" || true
+          gh pr create --base "$BASE_BRANCH" --head "$branch_name" \
+            --title "$task_name" \
+            --body "Automated implementation by Ralphy (Agent $agent_num)" \
+            ${PR_DRAFT:+--draft} 2>>"$log_file" || true
+        )
+      fi
+      echo "done" > "$status_file"
+      echo "$input_tokens $output_tokens $branch_name" > "$output_file"
+      cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
+      return 0
+    else
+      # Rejected or timeout - mark failed for retry
+      echo "review_failed" > "$status_file"
+      echo "0 0" > "$output_file"
+      mark_task_failed_beads "$task_name"
+      cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
+      return 1
+    fi
   else
     echo "failed" > "$status_file"
     echo "0 0" > "$output_file"
@@ -2592,6 +3141,7 @@ run_parallel_tasks() {
 
   # Export variables needed by subshell agents
   export AI_ENGINE MAX_RETRIES RETRY_DELAY BEADS_LABEL BEADS_TYPE_FILTER CREATE_PR PR_DRAFT
+  export CODE_REVIEW_ENABLED MAX_REVIEW_ITERATIONS REVIEW_TIMEOUT REVIEW_ENGINE
 
   local batch_num=0
   local completed_branches=()
@@ -3751,6 +4301,10 @@ show_summary() {
 
 main() {
   BR_START_TIME=$(date +%s)
+
+  # Load review config BEFORE parse_args so CLI flags can override
+  load_review_config
+
   parse_args "$@"
 
   # Handle --init mode
