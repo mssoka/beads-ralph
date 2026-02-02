@@ -43,6 +43,7 @@ Beads-Ralphy is a bash orchestrator that connects your beads issue tracker to AI
 - Level N: Tasks that depend on Level N-1
 - Each agent gets isolated workspace: separate worktree + branch
 - Auto-merges results or creates PRs (your choice)
+- **No code review** - agents run coding tasks only (for simplicity and reliability)
 
 ### Task Organization
 
@@ -193,7 +194,9 @@ Adjust retry behavior:
 
 ### Code Review
 
-After a coding agent completes its task, an optional review step validates the implementation before marking the task as complete.
+> **Note:** Code review is only available in **sequential mode**. Parallel mode runs coding agents without the review step for simplicity and reliability.
+
+After a coding agent completes its task (sequential mode only), an optional review step validates the implementation before marking the task as complete.
 
 #### Review Flow
 
@@ -270,16 +273,7 @@ Review outputs are logged for debugging:
 # e.g., .ralphy/logs/os-b84-review-1-20260202-133749.log
 ```
 
-**Parallel Mode:**
-Appended to the agent's log file with markers:
-```
-=== REVIEW OUTPUT (iteration 1) ===
-<review>APPROVED</review>
-<summary>...</summary>
-=== END REVIEW OUTPUT ===
-```
-
-#### Configuration
+#### Configuration (Sequential Mode Only)
 
 ```bash
 ./br --review                   # Enable code review (default when configured)
@@ -419,6 +413,8 @@ Beads-Ralphy automatically computes execution tracks based on task dependencies:
 ./br --parallel --max-parallel 5 # 5 agents max
 ```
 
+> **Note:** Parallel mode runs coding agents only (no code review step). For code review, use sequential mode.
+
 **How it works:**
 - **Track 0**: Tasks with no blockers (run in parallel)
 - **Track 1**: Tasks blocked by track 0 (run after track 0 completes)
@@ -533,7 +529,7 @@ Branch naming: `ralphy/<task-id-title-slug>`
 | `--max-iterations N` | Stop after N tasks |
 | `--max-retries N` | Retries per task (default: 3) |
 | `--retry-delay N` | Seconds between retries |
-| `--review` | Enable code review step |
+| `--review` | Enable code review step (sequential mode only) |
 | `--no-review` | Disable code review step |
 | `--max-review-iterations N` | Max review cycles before force-complete (default: 3) |
 | `--review-timeout N` | Review timeout in seconds (default: 600) |

@@ -2823,13 +2823,25 @@ create_agent_worktree() {
   # All git output goes to stderr so it doesn't interfere with our return value
   (
     cd "$ORIGINAL_DIR" || { echo "Failed to cd to $ORIGINAL_DIR" >&2; exit 1; }
-    
+
     # Prune any stale worktrees first
     git worktree prune >&2
-    
-    # Delete branch if it exists (force)
-    git branch -D "$branch_name" >&2 2>/dev/null || true
-    
+
+    # Find and remove any existing worktree using this branch (from previous runs)
+    # The worktree might be in a different temp directory from a previous run
+    existing_wt=""
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+        existing_wt="${BASH_REMATCH[1]}"
+      elif [[ "$line" == "branch refs/heads/$branch_name" && -n "$existing_wt" ]]; then
+        git worktree remove -f "$existing_wt" >/dev/null 2>&1 || true
+        break
+      fi
+    done < <(git worktree list --porcelain)
+
+    # Delete branch if it exists (force) - now safe after worktree removal
+    git branch -D "$branch_name" >/dev/null 2>&1 || true
+
     # Create branch from base
     git branch "$branch_name" "$BASE_BRANCH" >&2 || { echo "Failed to create branch $branch_name from $BASE_BRANCH" >&2; exit 1; }
     
@@ -2913,7 +2925,7 @@ run_parallel_agent() {
   # Ensure .ralphy/ directory exists in worktree
   mkdir -p "$worktree_dir/$RALPHY_DIR"
 
-  # Build prompt for this specific task
+  # Build prompt for this specific task (simple version for parallel mode)
   local prompt="You are working on a specific task. Focus ONLY on this task:
 
 TASK: $task_name
@@ -2922,7 +2934,11 @@ Instructions:
 1. Implement this specific task completely
 2. Write and run tests - all tests must pass
 3. Run build - build must succeed without errors
-4. Commit your changes with a descriptive message
+4. Self-review your changes:
+   - Check that all acceptance criteria are met
+   - Verify code quality and no obvious issues
+   - Fix any problems before committing
+5. Commit your changes with a descriptive message
 
 When THIS TASK is complete, output <promise>COMPLETE</promise>
 Focus only on implementing: $task_name"
@@ -2930,7 +2946,7 @@ Focus only on implementing: $task_name"
   # Temp file for AI output
   local tmpfile
   tmpfile=$(mktemp)
-  
+
   # Run AI agent in the worktree directory
   local result=""
   local success=false
@@ -2995,15 +3011,13 @@ Focus only on implementing: $task_name"
         (
           cd "$worktree_dir"
           claude --dangerously-skip-permissions \
-            --verbose \
-            --output-format stream-json \
-            -p "$prompt"
-        ) > "$tmpfile" 2>>"$log_file"
+            -p "$prompt" 2>&1 | tee -a "$ORIGINAL_DIR/$log_file"
+        ) > "$tmpfile"
         ;;
     esac
-    
+
     result=$(cat "$tmpfile" 2>/dev/null || echo "")
-    
+
     if [[ -n "$result" ]]; then
       local error_msg
       if ! error_msg=$(check_for_errors "$result"); then
@@ -3015,14 +3029,14 @@ Focus only on implementing: $task_name"
       success=true
       break
     fi
-    
+
     ((retry++)) || true
     echo "Retry $retry/$MAX_RETRIES after empty response" >> "$log_file"
     sleep "$RETRY_DELAY"
   done
-  
+
   rm -f "$tmpfile"
-  
+
   if [[ "$success" == true ]]; then
     # Parse tokens
     local parsed input_tokens output_tokens
@@ -3035,26 +3049,7 @@ Focus only on implementing: $task_name"
     [[ "$input_tokens" =~ ^[0-9]+$ ]] || input_tokens=0
     [[ "$output_tokens" =~ ^[0-9]+$ ]] || output_tokens=0
 
-    # Debug: Log token extraction for parallel agents
-    if [[ "${VERBOSE:-false}" == true ]]; then
-      echo "DEBUG: Parallel agent tokens - Input: $input_tokens, Output: $output_tokens" >> "$log_file"
-    fi
-
     rm -f "${tmpfile}.last"
-
-    # Check if AI signaled task completion (align with sequential mode)
-    # The prompt instructs: "When THIS TASK is complete, output <promise>COMPLETE</promise>"
-    # Without this signal, we can't be sure the agent finished vs got interrupted
-    if [[ "$result" != *"<promise>COMPLETE</promise>"* ]]; then
-      echo "ERROR: Agent did not output COMPLETE signal." >> "$log_file"
-      echo "  The agent may have been interrupted or failed silently." >> "$log_file"
-      echo "  Expected: <promise>COMPLETE</promise> in agent output." >> "$log_file"
-      echo "failed" > "$status_file"
-      echo "0 0" > "$output_file"
-      mark_task_failed_beads "$task_name"
-      cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
-      return 1
-    fi
 
     # Ensure at least one commit exists before marking success
     local commit_count
@@ -3069,123 +3064,28 @@ Focus only on implementing: $task_name"
       return 1
     fi
 
-    # Run code review in worktree context
-    local review_status=0
-    if [[ "$CODE_REVIEW_ENABLED" == "true" ]]; then
-      # Get task_id for iteration tracking
-      local task_id=$(echo "$task_name" | cut -d: -f1)
-
-      # Get/increment iteration count - PERSISTED via task notes (cross-process safe)
-      local iteration
-      iteration=$(get_review_iteration "$task_name")
-      ((iteration++))
-      set_review_iteration "$task_name" "$iteration"
-
-      # Check max iterations BEFORE running review
-      if [[ $iteration -gt $MAX_REVIEW_ITERATIONS ]]; then
-        echo "Max review iterations ($MAX_REVIEW_ITERATIONS) reached, force-completing" >> "$log_file"
-        clear_review_iteration "$task_name"
-        # Skip review, treat as approved
-        review_status=0
-      else
-        echo "Running code review (iteration $iteration/$MAX_REVIEW_ITERATIONS)..." >> "$log_file"
-
-        local prompt_file result_file review_result
-        prompt_file=$(mktemp)
-        result_file=$(mktemp)
-
-        # Write prompt to file to avoid shell quoting issues
-        (cd "$worktree_dir" && build_review_prompt "$task_name" "$iteration") > "$prompt_file"
-
-        local engine="${REVIEW_ENGINE:-$AI_ENGINE}"
-        local timeout_exit=0
-
-        if command -v timeout &>/dev/null; then
-          # GNU timeout - exit code 124
-          timeout "$REVIEW_TIMEOUT" bash -c '
-            engine="$1"
-            prompt_file="$2"
-            worktree_dir="$3"
-            cd "$worktree_dir"
-            case "$engine" in
-              opencode)
-                OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode run --format json "$(cat "$prompt_file")"
-                ;;
-              *)
-                claude --dangerously-skip-permissions --print "$(cat "$prompt_file")"
-                ;;
-            esac
-          ' _ "$engine" "$prompt_file" "$worktree_dir" > "$result_file" 2>>"$log_file"
-          timeout_exit=$?
-        else
-          # macOS perl - exit code 142
-          perl -e 'alarm shift; exec @ARGV' "$REVIEW_TIMEOUT" bash -c '
-            prompt_file="$1"
-            worktree_dir="$2"
-            cd "$worktree_dir"
-            claude --dangerously-skip-permissions --print "$(cat "$prompt_file")"
-          ' _ "$prompt_file" "$worktree_dir" > "$result_file" 2>>"$log_file"
-          timeout_exit=$?
-        fi
-
-        rm -f "$prompt_file"
-        review_result=$(cat "$result_file" 2>/dev/null || echo "")
-        rm -f "$result_file"
-
-        # Log full review output for debugging
-        echo "=== REVIEW OUTPUT (iteration $iteration) ===" >> "$log_file"
-        echo "$review_result" >> "$log_file"
-        echo "=== END REVIEW OUTPUT ===" >> "$log_file"
-
-        # Check for timeout: GNU=124, macOS perl=142
-        if [[ $timeout_exit -eq 124 ]] || [[ $timeout_exit -eq 142 ]]; then
-          echo "Review timed out after ${REVIEW_TIMEOUT}s" >> "$log_file"
-          update_task_with_feedback "$task_name" "Review timed out after ${REVIEW_TIMEOUT}s. Will retry." "$iteration"
-          review_status=3
-        elif [[ "$review_result" == *"<review>APPROVED</review>"* ]]; then
-          echo "Review APPROVED" >> "$log_file"
-          # Extract and store summary
-          local summary
-          summary=$(echo "$review_result" | sed -n '/<summary>/,/<\/summary>/p' | sed '1d;$d')
-          [[ -n "$summary" ]] && update_task_with_feedback "$task_name" "APPROVED: $summary" "$iteration"
-          # Clear persisted iteration counter
-          clear_review_iteration "$task_name"
-          review_status=0
-        else
-          echo "Review REJECTED or unclear" >> "$log_file"
-          local feedback
-          feedback=$(echo "$review_result" | sed -n '/<feedback>/,/<\/feedback>/p' | sed '1d;$d')
-          [[ -z "$feedback" ]] && feedback="Rejected without specific feedback."
-          update_task_with_feedback "$task_name" "$feedback" "$iteration"
-          review_status=1
-        fi
-      fi
+    # Create PR if requested
+    if [[ "$CREATE_PR" == true ]]; then
+      (
+        cd "$worktree_dir"
+        git push -u origin "$branch_name" 2>>"$log_file" || true
+        gh pr create \
+          --base "$BASE_BRANCH" \
+          --head "$branch_name" \
+          --title "$task_name" \
+          --body "Automated implementation by Ralphy (Agent $agent_num)" \
+          ${PR_DRAFT:+--draft} 2>>"$log_file" || true
+      )
     fi
 
-    if [[ $review_status -eq 0 ]]; then
-      # Approved - continue to PR creation
-      if [[ "$CREATE_PR" == true ]]; then
-        (
-          cd "$worktree_dir"
-          git push -u origin "$branch_name" 2>>"$log_file" || true
-          gh pr create --base "$BASE_BRANCH" --head "$branch_name" \
-            --title "$task_name" \
-            --body "Automated implementation by Ralphy (Agent $agent_num)" \
-            ${PR_DRAFT:+--draft} 2>>"$log_file" || true
-        )
-      fi
-      echo "done" > "$status_file"
-      echo "$input_tokens $output_tokens $branch_name" > "$output_file"
-      cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
-      return 0
-    else
-      # Rejected or timeout - mark failed for retry
-      echo "review_failed" > "$status_file"
-      echo "0 0" > "$output_file"
-      mark_task_failed_beads "$task_name"
-      cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
-      return 1
-    fi
+    # Write success output
+    echo "done" > "$status_file"
+    echo "$input_tokens $output_tokens $branch_name" > "$output_file"
+
+    # Cleanup worktree (but keep branch)
+    cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
+
+    return 0
   else
     echo "failed" > "$status_file"
     echo "0 0" > "$output_file"
