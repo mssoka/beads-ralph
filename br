@@ -16,6 +16,23 @@ VERSION="4.0.0"
 
 # Ralphy config directory
 RALPHY_DIR=".ralphy"
+RALPHY_LOGS_DIR="$RALPHY_DIR/logs"
+
+# Create a log file path for a task
+# Usage: get_task_log_path "task_id" ["suffix"]
+get_task_log_path() {
+  local task_id="$1"
+  local suffix="${2:-}"
+  # Sanitize task_id for filename (replace : and spaces)
+  local safe_id=$(echo "$task_id" | tr ':/ ' '---' | cut -c1-50)
+  local timestamp=$(date +%Y%m%d-%H%M%S)
+  mkdir -p "$RALPHY_LOGS_DIR"
+  if [[ -n "$suffix" ]]; then
+    echo "$RALPHY_LOGS_DIR/${safe_id}-${suffix}-${timestamp}.log"
+  else
+    echo "$RALPHY_LOGS_DIR/${safe_id}-${timestamp}.log"
+  fi
+}
 
 # Config file detection helpers
 detect_config_file() {
@@ -1361,8 +1378,7 @@ cleanup() {
   # Kill any remaining child processes
   pkill -P $$ 2>/dev/null || true
   
-  # Remove temp file
-  [[ -n "$tmpfile" ]] && rm -f "$tmpfile"
+  # Keep log file in .ralphy/logs/ - only remove codex temp file
   [[ -n "$CODEX_LAST_MESSAGE_FILE" ]] && rm -f "$CODEX_LAST_MESSAGE_FILE"
   
   # Cleanup parallel worktrees
@@ -2539,8 +2555,10 @@ run_single_task() {
     log_info "Working on branch: $branch_name"
   fi
 
-  # Temp file for AI output
-  tmpfile=$(mktemp)
+  # Log file for AI output (persisted in .ralphy/logs/)
+  local task_id=$(echo "$current_task" | cut -d: -f1)
+  tmpfile=$(get_task_log_path "$task_id")
+  echo "${DIM}┃ Log: $tmpfile${RESET}"
 
   # Build the prompt
   local prompt
@@ -2589,7 +2607,7 @@ run_single_task() {
         sleep "$RETRY_DELAY"
         continue
       fi
-      rm -f "$tmpfile"
+      # Log kept in $tmpfile for debugging
       tmpfile=""
       return_to_base_branch
       mark_task_failed "$current_task"
@@ -2606,7 +2624,7 @@ run_single_task() {
         sleep "$RETRY_DELAY"
         continue
       fi
-      rm -f "$tmpfile"
+      # Log kept in $tmpfile for debugging
       tmpfile=""
       return_to_base_branch
       mark_task_failed "$current_task"
@@ -2661,7 +2679,7 @@ run_single_task() {
       fi
     fi
 
-    rm -f "$tmpfile"
+    # Log kept in $tmpfile for debugging
     tmpfile=""
     if [[ "$AI_ENGINE" == "codex" ]] && [[ -n "$CODEX_LAST_MESSAGE_FILE" ]]; then
       rm -f "$CODEX_LAST_MESSAGE_FILE"
@@ -3251,9 +3269,10 @@ run_parallel_tasks() {
         local agent_num=$((iteration + 1))
         ((iteration++)) || true
 
+        local task_id=$(echo "$task" | cut -d: -f1)
         local status_file=$(mktemp)
         local output_file=$(mktemp)
-        local log_file=$(mktemp)
+        local log_file=$(get_task_log_path "$task_id" "agent$agent_num")
 
         batch_tasks+=("$task")
         status_files+=("$status_file")
@@ -3406,6 +3425,7 @@ run_parallel_tasks() {
         esac
 
         echo "  $tree_char $icon ${CYAN}Agent $agent_num${RESET}  $task_short$info"
+        echo "  $tree_char   ${DIM}Log: $log_file${RESET}"
 
         # Show log for failed agents
         if [[ "$status" == "failed" ]] && [[ -s "$log_file" ]]; then
@@ -3418,8 +3438,8 @@ run_parallel_tasks() {
           echo "${DIM}    └─${RESET}"
         fi
 
-        # Cleanup temp files
-        rm -f "$status_file" "$output_file" "$log_file"
+        # Cleanup temp files (keep log_file in .ralphy/logs/)
+        rm -f "$status_file" "$output_file"
       done
 
       batch_start=$batch_end
