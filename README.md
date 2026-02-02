@@ -191,6 +191,115 @@ Adjust retry behavior:
 - Default: `(3 - 1) × 5s = 10s`
 - With `--max-retries 5 --retry-delay 10`: `(5 - 1) × 10s = 40s`
 
+### Code Review
+
+After a coding agent completes its task, an optional review step validates the implementation before marking the task as complete.
+
+#### Review Flow
+
+```
+┌─────────────────────────────┐
+│ Coding Agent Completes      │
+│ (<promise>COMPLETE</promise>)│
+└──────────────┬──────────────┘
+               │
+               ↓
+        Code Review Enabled?
+               │
+        ├─ NO ────→ Mark task complete
+        │
+        └─ YES ↓
+               │
+┌──────────────────────────────┐
+│ Review Agent Runs            │
+│ - Checks acceptance criteria │
+│ - Verifies tests pass        │
+│ - Reviews code quality       │
+└──────────────┬───────────────┘
+               │
+               ├─ <review>APPROVED</review>
+               │   └─→ Mark task complete ✅
+               │
+               ├─ <review>REJECTED</review>
+               │   └─→ Feedback added to task notes
+               │       Task retries with feedback
+               │       (up to MAX_REVIEW_ITERATIONS)
+               │
+               └─ Unclear/Timeout
+                   └─→ Treated as rejected, retry
+```
+
+#### Review Iterations
+
+The review cycle allows multiple attempts for the coding agent to address feedback:
+
+```
+Iteration 1: Agent implements → Reviewer rejects with feedback
+Iteration 2: Agent fixes issues → Reviewer rejects again
+Iteration 3: Agent addresses all feedback → Reviewer APPROVES ✅
+
+(or after MAX_REVIEW_ITERATIONS: force-complete)
+```
+
+#### Reviewer Expected Output
+
+The reviewer must output exactly one of:
+
+```xml
+<review>APPROVED</review>
+<summary>Brief summary of what was verified.</summary>
+```
+
+OR
+
+```xml
+<review>REJECTED</review>
+<feedback>
+1. [Issue]: [Description] → Fix: [How to fix]
+2. [Issue]: [Description] → Fix: [How to fix]
+</feedback>
+```
+
+#### Review Logging
+
+Review outputs are logged for debugging:
+
+**Sequential Mode:**
+```
+.ralphy/logs/{task_id}-review-{iteration}-{timestamp}.log
+# e.g., .ralphy/logs/os-b84-review-1-20260202-133749.log
+```
+
+**Parallel Mode:**
+Appended to the agent's log file with markers:
+```
+=== REVIEW OUTPUT (iteration 1) ===
+<review>APPROVED</review>
+<summary>...</summary>
+=== END REVIEW OUTPUT ===
+```
+
+#### Configuration
+
+```bash
+./br --review                   # Enable code review (default when configured)
+./br --no-review                # Disable code review
+./br --max-review-iterations 5  # Max review cycles (default: 3)
+./br --review-timeout 300       # Review timeout in seconds (default: 600)
+./br --review-engine opencode   # Use different engine for review
+```
+
+#### Review Engines
+
+The reviewer can use a different AI engine than the coding agent:
+
+```bash
+./br --opencode --review-engine claude  # Code with OpenCode, review with Claude
+./br --cursor --review-engine claude    # Code with Cursor, review with Claude
+```
+
+Supported review engines: `claude`, `opencode`, `cursor`, `qwen`, `droid`, `codex`, `gemini`
+
 ---
 
 ## Quick Start
@@ -424,6 +533,11 @@ Branch naming: `ralphy/<task-id-title-slug>`
 | `--max-iterations N` | Stop after N tasks |
 | `--max-retries N` | Retries per task (default: 3) |
 | `--retry-delay N` | Seconds between retries |
+| `--review` | Enable code review step |
+| `--no-review` | Disable code review step |
+| `--max-review-iterations N` | Max review cycles before force-complete (default: 3) |
+| `--review-timeout N` | Review timeout in seconds (default: 600) |
+| `--review-engine ENGINE` | AI engine for review (claude, opencode, etc.) |
 | `--dry-run` | Preview without executing |
 | `-v, --verbose` | Debug output |
 | `--init` | Setup .ralphy/ config |
