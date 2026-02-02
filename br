@@ -222,6 +222,36 @@ slugify() {
 # BROWNFIELD MODE (.ralphy/ configuration)
 # ============================================
 
+# Install beads skill to .claude/skills/ if Claude Code is detected
+install_beads_skill() {
+  # Only install if .claude/ directory exists (Claude Code is configured)
+  if [[ ! -d ".claude" ]]; then
+    return 0
+  fi
+
+  local skill_dir=".claude/skills/beads"
+
+  # Get script directory to find bundled skill
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local source_skill="$script_dir/skills/beads"
+
+  if [[ ! -d "$source_skill" ]]; then
+    log_debug "No bundled beads skill found at $source_skill"
+    return 0
+  fi
+
+  # Check if skill already exists
+  if [[ -d "$skill_dir" ]]; then
+    log_debug "Beads skill already installed at $skill_dir"
+    return 0
+  fi
+
+  mkdir -p ".claude/skills"
+  cp -r "$source_skill" "$skill_dir"
+  log_success "Installed beads skill to $skill_dir"
+}
+
 # Initialize .ralphy/ directory with config files
 init_ralphy_config() {
   if [[ -d "$RALPHY_DIR" ]]; then
@@ -404,6 +434,10 @@ EOF
   log_success "Created $RALPHY_DIR/"
   echo ""
   echo "  ${CYAN}$CONFIG_FILE${RESET}   - Your rules and preferences"
+
+  # Install beads skill for Claude Code integration
+  install_beads_skill
+
   echo ""
   echo "${BOLD}Next steps:${RESET}"
   echo "  1. Add rules:  ${CYAN}br --add-rule \"your rule here\"${RESET}"
