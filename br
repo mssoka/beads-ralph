@@ -1446,13 +1446,13 @@ get_tasks_beads() {
 }
 
 get_next_task_beads() {
-  # Get top-ranked task from BD list (exclude epics)
+  # Get top-ranked UNBLOCKED task from BD ready (exclude epics)
+  # bd ready only returns tasks with no open blockers
   local label_filter="${BEADS_LABEL:-ralph}"
   local type_filter="${BEADS_TYPE_FILTER:-}"
 
-  bd list --json 2>/dev/null | \
+  bd ready --json 2>/dev/null | \
     jq -r --arg label "$label_filter" --arg type "$type_filter" '.[] |
-           select(.status == "open") |
            select(.issue_type != "epic") |
            select(.labels | index($label)) |
            select(if $type == "" then true else .issue_type == $type end) |
