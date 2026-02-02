@@ -469,6 +469,7 @@ load_review_config() {
   [[ "$cfg_max" =~ ^[1-9][0-9]*$ ]] && MAX_REVIEW_ITERATIONS="$cfg_max"
   [[ "$cfg_timeout" =~ ^[1-9][0-9]*$ ]] && REVIEW_TIMEOUT="$cfg_timeout"
   [[ -n "$cfg_engine" ]] && REVIEW_ENGINE="$cfg_engine"
+  return 0
 }
 
 # Load rules from config.yaml
@@ -674,6 +675,7 @@ build_beads_prompt() {
   local description=$(echo "$task_data" | jq -r '.description // ""')
   local design=$(echo "$task_data" | jq -r '.design // ""')
   local acceptance=$(echo "$task_data" | jq -r '.acceptance // ""')
+  local notes=$(echo "$task_data" | jq -r '.notes // ""')
 
   local prompt=""
 
@@ -682,8 +684,18 @@ build_beads_prompt() {
   review_feedback=$(get_review_feedback "$task")
   if [[ -n "$review_feedback" ]]; then
     prompt+="## IMPORTANT: Previous Review Feedback
-Your previous implementation was rejected. Address these issues:
+Your previous implementation was rejected. Address these issues FIRST:
 $review_feedback
+
+"
+  fi
+
+  # Add prominent task notes section
+  if [[ -n "$notes" ]]; then
+    prompt+="## Task Notes (READ THIS FIRST)
+These notes contain important context from previous work:
+
+$notes
 
 "
   fi
@@ -762,30 +774,40 @@ $acceptance
 
   prompt+="
 ## Instructions
-1. Review recently completed tasks above for patterns and gotchas
-2. Implement the task following the design approach
-3. Verify all acceptance criteria are met
-4. Run tests and verify they pass
+1. If there's review feedback above, address those issues FIRST
+2. Review recently completed tasks above for patterns and gotchas
+3. Implement the task following the design approach
+4. Verify all acceptance criteria are met
+5. Run tests and verify they pass
    - Determine the appropriate test command for this project
    - All tests must pass before marking complete
-5. Run build and verify it succeeds
+6. Run build and verify it succeeds
    - Determine the appropriate build command for this project
    - Build must complete without errors before marking complete"
 
   # Add commit instruction only if auto-commit is enabled
-  local step_num=6
+  local step_num=7
   if [[ "$AUTO_COMMIT" == "true" ]]; then
     prompt+="
 $step_num. Commit your changes with a descriptive message"
-    step_num=7
+    ((step_num++))
   fi
 
   prompt+="
-$step_num. Update this task's notes with what you learned:
-   bd update $task_id --notes 'Brief summary of: patterns discovered, gotchas encountered, implementation approach'
+
+## Before Completion (REQUIRED)
+Update this task's notes with what you did:
+
+bd update $task_id --notes \"\$(bd show $task_id --json | jq -r '.[0].notes // \"\"')
+
+[IMPLEMENTATION]
+Summary: <what was implemented>
+Files changed: <list of files>
+Approach: <key decisions made>
+[END IMPLEMENTATION]\"
 
 ## Completion Signal
-When THIS TASK is complete (after updating notes), output <promise>COMPLETE</promise>
+After updating notes, output <promise>COMPLETE</promise>
 
 Keep changes focused and minimal. Do not refactor unrelated code."
 
@@ -1519,8 +1541,9 @@ get_review_feedback() {
   local task_id=$(echo "$task" | cut -d: -f1)
   local notes
   notes=$(bd show "$task_id" --json 2>/dev/null | jq -r '.[0].notes // ""')
-  if [[ "$notes" == *"[REVIEW FEEDBACK]"* ]]; then
-    echo "$notes" | sed -n '/\[REVIEW FEEDBACK\]/,$p' | head -50
+  # Match the new format: [REVIEW FEEDBACK - Iteration N]
+  if [[ "$notes" == *"[REVIEW FEEDBACK"* ]]; then
+    echo "$notes" | sed -n '/\[REVIEW FEEDBACK/,$p' | head -50
   fi
 }
 
@@ -1662,6 +1685,8 @@ After thorough review:
 - Security vulnerabilities or obvious bugs exist
 - Code violates project rules
 
+## Output
+
 Output EXACTLY one of:
 
 <review>APPROVED</review>
@@ -1671,9 +1696,9 @@ OR
 
 <review>REJECTED</review>
 <feedback>
-1. [Issue]: [Description] → [How to fix]
-2. [Issue]: [Description] → [How to fix]
-(List ALL issues found, be specific)
+1. [Issue]: [Description] → Fix: [How to fix]
+2. [Issue]: [Description] → Fix: [How to fix]
+(List ALL issues found with specific fix instructions)
 </feedback>
 <summary>Brief summary for task notes.</summary>
 PROMPT
